@@ -250,7 +250,7 @@ def main() -> int:
         print("\n[+] draft — writing the story from the raw transcript")
         prov = drafter_mod.resolve_provider(ROOT, prefer_model=args.draft_model)
         if not prov:
-            print("  " + llm_mod.no_backend_message() + " — skipping draft.")
+            print("  " + llm_mod.no_backend_message() + ". Skipping the draft.")
         else:
             try:
                 vpath = args.voice.expanduser() if args.voice else None
@@ -345,7 +345,7 @@ def main() -> int:
         backend = llm_mod.resolve_backend(ROOT)
         if not backend:
             print("\n[+] bad-take detection")
-            print("  " + llm_mod.no_backend_message() + " — skipping bad-take pass.")
+            print("  " + llm_mod.no_backend_message() + ". Skipping the bad-take pass.")
         else:
             print(f"\n[+] bad-take detection · {llm_mod.describe(backend)}")
             protect = []
@@ -359,7 +359,7 @@ def main() -> int:
                     transcript, backend=backend, protect_spans=protect,
                 )
             except Exception as e:  # a flaky model call must never lose the whole cut
-                print(f"  bad-take pass failed ({e}) — continuing with the plain cut.")
+                print(f"  bad-take pass failed ({e}). Continuing with the plain cut.")
                 bt = None
             if bt:
                 bad_spans = bt["spans"]

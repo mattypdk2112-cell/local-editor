@@ -34,7 +34,16 @@ DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 # a text-reordering job; Opus would spend their plan limits for no better answer.
 DEFAULT_CLAUDE_MODEL = "sonnet"
 
-_FENCE_RE = re.compile(r"^```(?:json)?|```$")
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+
+# Claude Code is an agent, not a completion endpoint. Left alone it will try a tool
+# call first and then hand back the answer wrapped in an apology and a code fence.
+# This tells it to behave like an API. _extract_json still assumes it won't.
+JSON_ONLY_SYSTEM = (
+    "You are a JSON API. Reply with one raw JSON object and absolutely nothing else: "
+    "no preamble, no explanation, no markdown code fences. Do not use any tools. "
+    "Everything you need is in the message."
+)
 
 
 def load_env_key(name: str, *, project_root) -> str | None:
@@ -96,8 +105,32 @@ def describe(backend: dict) -> str:
 
 
 def _extract_json(text: str) -> dict:
-    text = _FENCE_RE.sub("", (text or "").strip()).strip()
-    return json.loads(text)
+    """Get the JSON object out of a model reply, however it chose to dress it up.
+
+    Tried in order: the whole thing, whatever is inside a code fence, then the
+    outermost braces. Models wrap answers in prose and fences no matter how firmly
+    the prompt says not to, and a whole edit should not be lost to a stray sentence.
+    """
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("model returned an empty reply")
+
+    candidates = [text]
+    fenced = _FENCE_RE.search(text)
+    if fenced:
+        candidates.append(fenced.group(1).strip())
+    a, b = text.find("{"), text.rfind("}")
+    if a != -1 and b > a:
+        candidates.append(text[a:b + 1])
+
+    for c in candidates:
+        try:
+            parsed = json.loads(c)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError(f"no JSON object in the reply: {text[:160]}")
 
 
 def _call_claude_cli(prompt: str, *, model: str, timeout: float) -> tuple[dict, dict]:
@@ -111,6 +144,7 @@ def _call_claude_cli(prompt: str, *, model: str, timeout: float) -> tuple[dict, 
         claude_cli() or "claude", "-p",
         "--output-format", "json",
         "--model", model,
+        "--append-system-prompt", JSON_ONLY_SYSTEM,
         "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
     ]
     try:
@@ -185,9 +219,15 @@ def complete_json(backend: dict, prompt: str, *, timeout: float = 300.0,
 
 
 def estimate_cost(usage: dict, backend_name: str) -> float:
-    """Dollars for this call. Claude Code reports its own; the APIs we price here."""
+    """Out-of-pocket dollars for this call, which is what a user actually wants to know.
+
+    Zero for Claude Code: it runs on the plan they already pay for, so surfacing the
+    API-rate equivalent it reports (~$0.25 a pass, mostly system-prompt overhead) would
+    read as a bill that never arrives. The APIs below are billed per call, so those
+    are priced for real.
+    """
     if backend_name == "claude_cli":
-        return round(float(usage.get("_cost_usd") or 0.0), 6)
+        return 0.0
     if backend_name == "openrouter":  # Claude Sonnet 5 list: ~$3/1M in, $15/1M out
         pt = int(usage.get("prompt_tokens") or 0)
         ct = int(usage.get("completion_tokens") or 0)
