@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Launcher. Runs the editor through its own virtualenv.
+#
+# If setup has never been run, this runs it for you rather than dying with a
+# stack trace about a missing .venv. Usage: ./edit <input.mp4> [options]
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV="$HERE/.venv"
+
+# ~/.local/bin is where setup puts ffmpeg when it can't use a package manager.
+export PATH="$HOME/.local/bin:$PATH"
+
+if [ ! -x "$VENV/bin/python" ]; then
+  echo "First run, setting up. This takes a couple of minutes, once."
+  echo
+  "$HERE/setup"
+  echo
+fi
+
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "error: ffmpeg is not installed, and the editor cannot cut video without it." >&2
+  echo "Run ./setup to install it, or on a Mac: brew install ffmpeg" >&2
+  exit 1
+fi
+
+exec "$VENV/bin/python" "$HERE/edit.py" "$@"

@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# One-time setup. Safe to re-run: every step checks before it does anything.
+#
+#   ./setup
+#
+# Installs ffmpeg if it is missing, builds a virtualenv, installs the two Python
+# packages the editor needs, and downloads the speech model so the first real
+# edit isn't the thing that waits on a 500MB download.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV="$HERE/.venv"
+export PATH="$HOME/.local/bin:$PATH"
+
+say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+ok()  { printf '  ✓ %s\n' "$*"; }
+die() { printf '\n\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+case "$(uname -s)" in
+  Darwin) OS=mac ;;
+  Linux)  OS=linux ;;
+  *) die "this runs on macOS and Linux. On Windows, use WSL." ;;
+esac
+
+# ── 1. ffmpeg ────────────────────────────────────────────────────────────────
+say "1/4  ffmpeg"
+if command -v ffmpeg >/dev/null 2>&1; then
+  ok "already installed ($(ffmpeg -version 2>/dev/null | head -1 | cut -d' ' -f3))"
+elif [ "$OS" = mac ]; then
+  if command -v brew >/dev/null 2>&1; then
+    brew install ffmpeg
+    ok "installed with Homebrew"
+  else
+    die "ffmpeg is missing and Homebrew isn't installed.
+  Install Homebrew from https://brew.sh then run ./setup again,
+  or install ffmpeg yourself and re-run."
+  fi
+else
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+    ok "installed with apt"
+  elif command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y ffmpeg
+    ok "installed with dnf"
+  else
+    die "couldn't find apt or dnf. Install ffmpeg with your package manager, then re-run."
+  fi
+fi
+
+# ── 2. python ────────────────────────────────────────────────────────────────
+say "2/4  python"
+PY=""
+for cand in python3.13 python3.12 python3.11 python3.10 python3.9 python3; do
+  if command -v "$cand" >/dev/null 2>&1; then
+    v="$("$cand" -c 'import sys; print(sys.version_info[0]*100+sys.version_info[1])' 2>/dev/null || echo 0)"
+    # 3.9 is the floor on purpose: it is what a stock Mac ships with, and every
+    # module here does `from __future__ import annotations` so the newer syntax
+    # never gets evaluated. Requiring 3.10 would send most Mac users to install
+    # Homebrew before they could try the thing.
+    if [ "$v" -ge 309 ] 2>/dev/null; then PY="$cand"; break; fi
+  fi
+done
+[ -n "$PY" ] || die "need Python 3.9 or newer.
+  Mac: it ships with macOS, try 'xcode-select --install'
+  Linux: sudo apt-get install python3 python3-venv"
+ok "using $PY ($("$PY" --version 2>&1 | cut -d' ' -f2))"
+
+# ── 3. virtualenv + packages ─────────────────────────────────────────────────
+say "3/4  packages"
+if [ ! -x "$VENV/bin/python" ]; then
+  "$PY" -m venv "$VENV" || die "couldn't create the virtualenv.
+  On Debian/Ubuntu you may need: sudo apt-get install python3-venv"
+  ok "created .venv"
+else
+  ok ".venv already there"
+fi
+"$VENV/bin/python" -m pip install --quiet --upgrade pip
+"$VENV/bin/python" -m pip install --quiet -r "$HERE/requirements.txt"
+ok "faster-whisper + httpx installed"
+
+# ── 4. speech model ──────────────────────────────────────────────────────────
+# Pulled now so the first edit doesn't stall on a download halfway through.
+say "4/4  speech model"
+"$VENV/bin/python" - <<'PY'
+from faster_whisper import WhisperModel
+WhisperModel("small", device="cpu", compute_type="int8")
+print("  ✓ whisper 'small' ready")
+PY
+
+# ── done ─────────────────────────────────────────────────────────────────────
+say "Ready."
+cat <<EOF
+  Cut your first video:
+
+      ./edit ~/Desktop/raw.mp4
+
+  It lands in ~/Downloads and opens by itself.
+EOF
+
+if ! command -v claude >/dev/null 2>&1; then
+  cat <<EOF
+
+  Note: --bad-takes and --draft need a model to think with, and they use the
+  Claude Code on your machine. It isn't installed, so those two flags will tell
+  you so and skip. Everything else works. claude.com/claude-code
+EOF
+fi
