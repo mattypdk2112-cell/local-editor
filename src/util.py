@@ -116,3 +116,101 @@ def next_versioned_path(out_dir: Path, stem: str, *, suffix: str = "edited", ext
             if m:
                 max_n = max(max_n, int(m.group(1)))
     return out_dir / f"{stem} {suffix} v{max_n + 1}.{ext}"
+
+
+def merge_overlaps(ranges: list[list[float]], *, eps: float = 0.001) -> tuple[list[list[float]], int]:
+    """Collapse overlapping/touching ranges. Returns (merged, overlaps_found).
+
+    Concat plays every range in order, so two ranges that overlap in SOURCE time
+    play the shared audio twice — the viewer hears "chilling on the couch chilling
+    on the couch" from a single clean take. Nothing upstream produced the stutter;
+    the tighten pass extended a tail past where the next range already started.
+
+    Merging rather than clipping because an overlap means the two ranges are one
+    continuous piece of speech: joining them keeps every word and removes the seam,
+    where clipping the earlier tail would re-introduce the clipped word tighten had
+    just restored.
+    """
+    if not ranges:
+        return [], 0
+    ordered = sorted([[float(a), float(b)] for a, b in ranges], key=lambda r: r[0])
+    merged = [ordered[0]]
+    overlaps = 0
+    for start, end in ordered[1:]:
+        prev = merged[-1]
+        if start < prev[1] - eps:
+            overlaps += 1
+            prev[1] = max(prev[1], end)
+        elif start <= prev[1] + eps:
+            prev[1] = max(prev[1], end)      # touching: join, no double-play
+        else:
+            merged.append([start, end])
+    return [[round(a, 3), round(b, 3)] for a, b in merged], overlaps
+
+
+def close_intraword_gaps(ranges: list[list[float]], words: list[dict],
+                         *, pad: float = 0.02) -> tuple[list[list[float]], int]:
+    """Join ranges whose gap falls INSIDE a spoken word. Returns (ranges, joins).
+
+    Cutting mid-word chops a syllable and replays the rest after the join, which is
+    heard as a glitch rather than an edit: "describe" spanning 98.16-99.28 with a cut
+    at 98.40 and a resume at 98.70 comes out "descr...ibe".
+
+    merge_overlaps cannot see this because the ranges do not overlap — there is a
+    real gap, it just happens to land in the middle of a word. Word boundaries are
+    the only thing that makes a cut inaudible, so the gap is closed rather than moved.
+    """
+    if not ranges or not words:
+        return ranges, 0
+    out = [list(ranges[0])]
+    joins = 0
+    for start, end in ranges[1:]:
+        prev = out[-1]
+        gap_a, gap_b = prev[1], start
+        inside = any(w["start"] + pad < gap_a and w["end"] - pad > gap_b for w in words)
+        if inside:
+            prev[1] = max(prev[1], end)
+            joins += 1
+        else:
+            out.append([start, end])
+    return [[round(a, 3), round(b, 3)] for a, b in out], joins
+
+
+def boundary_report(ranges: list[list[float]], words: list[dict],
+                    *, min_silence: float = 0.20) -> list[dict]:
+    """Flag cuts that land in the middle of continuous speech.
+
+    A cut is inaudible when there is real silence either side of it. A cut with a
+    speaker mid-flow on both sides is heard as a glitch, a stutter or a truncated
+    word, and it is the single most common defect in a scripted cut — the matcher
+    reports "20/20 matched, coverage 1.0" because it found the TEXT, which says
+    nothing about whether the resulting EDGE is clean.
+
+    Returns one dict per suspect edge: {kind, at, gap, context}. Empty means every
+    boundary sits on silence.
+    """
+    if not ranges or not words:
+        return []
+    issues: list[dict] = []
+
+    def silence_before(t: float) -> float:
+        prev = [w for w in words if w["end"] <= t + 0.01]
+        nxt = [w for w in words if w["start"] >= t - 0.01]
+        if not prev or not nxt:
+            return 99.0
+        return max(0.0, nxt[0]["start"] - prev[-1]["end"])
+
+    def near(t: float, span: float = 1.4) -> str:
+        return " ".join(w["word"] for w in words if t - span <= w["start"] <= t + span)
+
+    for i, (a, b) in enumerate(ranges):
+        for kind, t in (("start", a), ("end", b)):
+            if i == 0 and kind == "start":
+                continue
+            if i == len(ranges) - 1 and kind == "end":
+                continue
+            gap = silence_before(t)
+            if gap < min_silence:
+                issues.append({"kind": kind, "at": round(t, 2), "gap": round(gap, 2),
+                               "context": near(t)[:70]})
+    return issues

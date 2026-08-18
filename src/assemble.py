@@ -16,13 +16,20 @@ from .util import run
 def _filtergraph(
     ranges: list[list[float]], has_music: bool, has_captions: bool,
     pre_gaps: list[float] | None = None, normalize: bool = True,
+    geom: str = "",
 ) -> str:
     # Short audio fade at each segment edge so the concat seams don't click
     # (a hard splice on a non-zero waveform pops) and the small word-release the
     # cutter keeps at butt-up seams tapers instead of reading as a fragment. 45ms
     # is inaudible as a fade; duration is preserved so A/V + captions stay in sync.
     fade = 0.045
-    pre_gaps = pre_gaps or [0.0] * len(ranges)
+    # Pad rather than trust the caller's length. The loop below indexes pre_gaps[i+1]
+    # while guarding on len(ranges), so any producer that hands back fewer gaps than
+    # ranges took the whole assemble down with an IndexError. The script-aware cutter
+    # does exactly that (30 ranges, 27 gaps), and a missing gap just means "no hold".
+    pre_gaps = list(pre_gaps or [])
+    if len(pre_gaps) < len(ranges):
+        pre_gaps += [0.0] * (len(ranges) - len(pre_gaps))
     lines: list[str] = []
     labels: list[str] = []
     for i, (s, e) in enumerate(ranges):
@@ -46,8 +53,14 @@ def _filtergraph(
     n = len(ranges)
     lines.append(f"{''.join(labels)}concat=n={n}:v=1:a=1[vcat][acat];")
 
+    # Reframe BEFORE the subtitles filter. The .ass is authored against the
+    # post-crop frame (see geometry.plan), so burning first and cropping after
+    # would shift every caption by the crop ratio.
+    pre = f"{geom}," if geom else ""
     if has_captions:
-        lines.append("[vcat]subtitles=captions.ass[vout];")
+        lines.append(f"[vcat]{pre}subtitles=captions.ass[vout];")
+    elif geom:
+        lines.append(f"[vcat]{geom}[vout];")
     else:
         lines.append("[vcat]null[vout];")
 
@@ -78,10 +91,12 @@ def assemble(
     pre_gaps: list[float] | None = None,
     normalize: bool = True,
     fast: bool = False,
+    geom: str = "",
 ) -> dict:
     graph_file = project / "filtergraph.txt"
     graph_file.write_text(
-        _filtergraph(ranges, music is not None, captions is not None, pre_gaps, normalize)
+        _filtergraph(ranges, music is not None, captions is not None, pre_gaps, normalize,
+                     geom=geom)
     )
 
     out = project / "output.mp4"

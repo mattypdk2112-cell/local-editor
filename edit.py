@@ -32,7 +32,8 @@ from src import speech as speech_mod  # noqa: E402
 from src import scriptmatch as scriptmatch_mod  # noqa: E402
 from src import titlecard as titlecard_mod  # noqa: E402
 from src import transcribe as transcribe_mod  # noqa: E402
-from src.util import (detect_silence, dump_json, fmt_secs, load_json,  # noqa: E402
+from src import geometry as geometry_mod  # noqa: E402
+from src.util import (merge_overlaps, close_intraword_gaps, boundary_report, detect_silence, dump_json, fmt_secs, load_json,  # noqa: E402
                       next_versioned_path, probe)
 
 ROOT = Path(__file__).resolve().parent
@@ -59,6 +60,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--caption-shadow", type=float, default=30.0, help="caption shadow 0-100 (CapCut-style)")
     p.add_argument("--caption-y", type=float, default=16.0,
                    help="caption baseline height, %% of frame height from the bottom (16 = lower third)")
+    p.add_argument("--caption-x", type=float, default=None,
+                   help="caption LEFT edge, %% of frame width. Omit for centred (the default)")
+    p.add_argument("--aspect", default=None,
+                   help="reframe the export to this ratio, e.g. 4:3. Crops, never pads")
+    p.add_argument("--crop-x", type=int, default=None,
+                   help="crop offset in SOURCE pixels from the left (needs --aspect). Omit to centre")
+    p.add_argument("--height", type=int, default=None,
+                   help="cap the export height, e.g. 1080. Only ever downscales")
     p.add_argument("--caption-bg", default=None,
                    help="highlight BOX colour behind the spoken word (RRGGBB); omit for coloured-text highlighting")
     p.add_argument("--strip-filler", action="store_true", help="drop um/uh from captions")
@@ -142,6 +151,9 @@ def parse_args() -> argparse.Namespace:
                         "clip vs minutes on CPU. Slightly softer, much faster")
     p.add_argument("--beside", action="store_true",
                    help="put the finished MP4 next to the input file instead of ~/Downloads")
+    p.add_argument("--dry-run", action="store_true",
+                   help="plan the cut, print the resulting transcript and any suspect cut\n"
+                        "                        boundaries, then STOP. No encode. Seconds instead of minutes")
     p.add_argument("--no-open", action="store_true", help="don't auto-open the result")
     return p.parse_args()
 
@@ -211,6 +223,10 @@ def main() -> int:
     info = probe(video)
     print(f"  source: {info['width']}x{info['height']}  {fmt_secs(info['duration'])}  "
           f"{info['fps']}fps  audio={'yes' if info['has_audio'] else 'NO'}")
+    geo = geometry_mod.plan(info["width"], info["height"], aspect=args.aspect,
+                            crop_x=args.crop_x, out_height=args.height)
+    if geo["chain"]:
+        print(f"  reframe: {geo['chain']}  ->  {geo['width']}x{geo['height']}")
     if not info["has_audio"]:
         print("error: no audio stream — nothing to transcribe or cut on.", file=sys.stderr)
         return 1
@@ -332,16 +348,20 @@ def main() -> int:
         except Exception as e:  # any align/parse failure → fall back, never crash a run
             print(f"  script align failed ({e}) — falling back.")
 
-    # 1.5b — bad-take detection (fallback / when no script)
+    cut_was_scripted = cut is not None
+
+    # 1.5b — bad-take detection. Runs on BOTH paths: a scripted cut keeps one
+    # contiguous span per beat, so any false start INSIDE a beat rides along and
+    # only this pass can see it.
     bad_spans: list[list[float]] = []
     bt_cache = project / "bad_takes.json"
-    if cut is None and args.bad_takes and not args.no_cut and bt_cache.exists() and not args.fresh:
+    if args.bad_takes and not args.no_cut and bt_cache.exists() and not args.fresh:
         import json as _json
         cachedbt = _json.loads(bt_cache.read_text())
         bad_spans = cachedbt.get("spans", [])
         print(f"\n[+] bad-take detection — reusing cached {len(bad_spans)} span(s) "
               f"(deterministic; --fresh to redo)")
-    elif cut is None and args.bad_takes and not args.no_cut:
+    elif args.bad_takes and not args.no_cut:
         backend = llm_mod.resolve_backend(ROOT)
         if not backend:
             print("\n[+] bad-take detection")
@@ -412,6 +432,9 @@ def main() -> int:
     # would otherwise be found and then thrown away. Subtracting from the finished
     # ranges works on every path; tighten (next) then snaps the new edges to real
     # speech, which also repairs whisper's sloppy span boundaries.
+    scripted_drop = [sp for sp in (bad_spans or []) if sp not in retake_spans] if cut_was_scripted else []
+    if scripted_drop:
+        retake_spans = retake_spans + scripted_drop
     if retake_spans:
         before = cut["kept_duration"]
         cut["ranges"] = speech_mod.subtract(cut["ranges"], retake_spans)
@@ -443,6 +466,27 @@ def main() -> int:
                   f"{len(bridged)} word(s) finished past the cut, "
                   f"{len(dropped)} silent range(s) dropped)")
             dump_json(project / "tighten.json", {"report": report})
+
+        # Tighten moves EDGES, and a restored tail can run past where the next range
+        # already begins. concat replays that shared audio, heard as a stutter the
+        # speaker never said. Merge before anything downstream sees it.
+        merged, overlaps = merge_overlaps(cut["ranges"])
+        if overlaps:
+            cut["ranges"] = merged
+            cut["kept_duration"] = round(sum(b - a for a, b in merged), 3)
+            cut["cuts"] = max(0, len(merged) - 1)
+            print(f"  merged {overlaps} overlapping range(s) -> "
+                  f"{cut['kept_duration']:.2f}s (each would have played twice)")
+
+        # A gap can also land mid-WORD without the ranges overlapping, which chops a
+        # syllable and replays the rest: "describe" -> "descr...ibe".
+        joined, njoin = close_intraword_gaps(cut["ranges"], transcript["words"])
+        if njoin:
+            cut["ranges"] = joined
+            cut["kept_duration"] = round(sum(b - a for a, b in joined), 3)
+            cut["cuts"] = max(0, len(joined) - 1)
+            print(f"  closed {njoin} cut(s) landing inside a word -> "
+                  f"{cut['kept_duration']:.2f}s")
 
             # tighten only moves EDGES. A pause sitting inside a kept range survives
             # it — and survives plan_cut too on the script-aware path, which never
@@ -497,6 +541,7 @@ def main() -> int:
             pre_gaps=cut.get("pre_gaps"),
             size=args.caption_size, stroke=args.caption_stroke,
             shadow_pct=args.caption_shadow, bg=args.caption_bg, y_pct=args.caption_y,
+            x_pct=args.caption_x,
         )
         path = project / "captions.ass"
         path.write_text(ass)
@@ -512,7 +557,7 @@ def main() -> int:
     if args.captions and not caption_from_cut:
         print("\n[3/4] captions")
         captions_path = write_captions(cut["kept_words"], cut["ranges"],
-                                       info["width"], info["height"])
+                                       geo["width"], geo["height"])
         print(f"  wrote {captions_path.name}")
     elif caption_from_cut:
         print("\n[3/4] captions — deferred until the cut exists (--caption-cut)")
@@ -520,6 +565,26 @@ def main() -> int:
         print("\n[3/4] captions — skipped")
 
     # 4 — assemble
+    # Cut is final here. Check the EDGES before paying for an encode: "20/20 matched,
+    # coverage 1.0" only means the text was found, not that the cut sounds clean.
+    issues = boundary_report(cut["ranges"], transcript["words"])
+    if issues:
+        print(f"\n[!] {len(issues)} cut(s) land mid-speech and may be heard as a glitch:")
+        for it in issues[:10]:
+            print(f"    {it['kind']:5} {it['at']:8.2f}s  only {it['gap']:.2f}s silence | {it['context']}")
+        if len(issues) > 10:
+            print(f"    ... and {len(issues) - 10} more")
+        print("    Fix by moving that beat's text to start/end on a real pause.")
+
+    if args.dry_run:
+        kept = [w for w in transcript["words"]
+                if any(a <= w["start"] < b for a, b in cut["ranges"])]
+        print(f"\n[dry-run] {cut['kept_duration']:.2f}s, {len(cut['ranges'])} range(s), "
+              f"{len(kept)} words. Nothing encoded.\n")
+        print(" ".join(w["word"] for w in kept))
+        print()
+        return 0
+
     print("\n[4/4] assemble")
     music = args.music.expanduser().resolve() if args.music else None
     # Lands in ~/Downloads unless told otherwise. Not beside the input: defaulting to
@@ -549,7 +614,7 @@ def main() -> int:
             video, project, cut["ranges"],
             music=music, captions=captions_path, export_path=export_path,
             pre_gaps=cut.get("pre_gaps"), normalize=not args.no_normalize,
-            fast=args.fast,
+            fast=args.fast, geom=geo["chain"],
         )
 
     if caption_from_cut:
@@ -574,6 +639,15 @@ def main() -> int:
             dump_json(cached_cut, cut_tx)
         if args.fix:
             cut_tx["words"], applied = transcribe_mod.apply_fixes(cut_tx["words"], args.fix)
+            # whisper re-decodes the CUT each render, so a pattern written against a
+            # previous decode silently stops matching. Say so rather than ship the
+            # wrong word burned into the pixels.
+            hit = {a.split(" -> ")[0].strip().lower() for a in applied}
+            missed = [f for f in args.fix
+                      if "=" in f and f.split("=", 1)[0].strip().lower() not in hit]
+            if missed:
+                print(f"  [!] {len(missed)} fix(es) matched nothing this run: "
+                      + ", ".join(repr(m) for m in missed[:6]))
             for a in applied:
                 print(f"  fixed: {a}")
         print(f"  {len(cut_tx['words'])} words: "
@@ -587,13 +661,13 @@ def main() -> int:
                  if (w["start"] + w["end"]) / 2 < cta_at]
                 if cta_at else cut_tx["words"])
         captions_path = write_captions(body, [[0.0, cut_dur]],
-                                       info["width"], info["height"])
+                                       geo["width"], geo["height"])
 
         # Title + CTA card share this encode rather than adding another pass.
         extra = None
         if args.title or args.cta_card:
             ass, mark = titlecard_mod.build(
-                info["width"], info["height"], cut_dur,
+                geo["width"], geo["height"], cut_dur,
                 title=args.title or "", benefit=args.title_benefit,
                 cta_keyword=args.cta_card, cta_line=args.cta_card_line,
                 cta_start=cta_at, title_out=args.title_secs,

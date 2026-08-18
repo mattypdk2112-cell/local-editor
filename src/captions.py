@@ -119,6 +119,7 @@ def build_ass(
     shadow_pct: float = 30.0,
     bg: str | None = None,
     y_pct: float = 16.0,
+    x_pct: float | None = None,
 ) -> str:
     """`size`/`stroke`/`shadow_pct` are CapCut-style dials, not pixels — a client reads
     their style off CapCut, so the numbers they hand us have to mean something here.
@@ -169,6 +170,17 @@ def build_ass(
     # mid-frame (Andrew's measure 46%) sets it per-org.
     margin_v = round(height * max(2.0, min(90.0, y_pct)) / 100.0)
     margin_h = round(width * 0.06)
+    # Horizontal placement. ASS has no free x, only an alignment corner plus margins,
+    # so "captions at 6% from the left" is alignment 1 (bottom-left) with MarginL set
+    # to that percentage. Default stays alignment 2 (bottom-centre), which is what
+    # every reel shipped before this existed and what the competitor set does.
+    # MarginR is held at the old 6% so a long line still wraps inside the frame
+    # instead of running off the right edge.
+    align = 2
+    margin_l = margin_r = margin_h
+    if x_pct is not None:
+        align = 1
+        margin_l = round(width * max(0.0, min(90.0, x_pct)) / 100.0)
 
     # A Black/Heavy face already carries the weight; asking libass to synthesise bold
     # on top of it smears the letterforms.
@@ -189,7 +201,7 @@ def build_ass(
            "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding")
     styles = [
         f"Style: Pop,{font},{fontsize},{primary},{secondary},{black},{black},{bold},0,0,0,"
-        f"100,100,0,0,1,{outline},{shadow},2,{margin_h},{margin_h},{margin_v},1"
+        f"100,100,0,0,1,{outline},{shadow},{align},{margin_l},{margin_r},{margin_v},1"
     ]
     # Drawing the highlight ourselves needs the font's own metrics. If the face can't be
     # found on this machine we fall back to BorderStyle=3 — a square box padded off the
@@ -208,8 +220,8 @@ def build_ass(
         # box doesn't cast its own — the text layer owns the shadow.
         styles.append(
             f"Style: Box,{font},{fontsize},{_hex_to_ass(color)},{_hex_to_ass(color)},"
-            f"{_hex_to_ass(bg)},{black},{bold},0,0,0,100,100,0,0,3,{box_pad},0,2,"
-            f"{margin_h},{margin_h},{margin_v},1"
+            f"{_hex_to_ass(bg)},{black},{bold},0,0,0,100,100,0,0,3,{box_pad},0,{align},"
+            f"{margin_l},{margin_r},{margin_v},1"
         )
     elif bg:
         # Vector box: no border/shadow of its own, filled with the highlight colour.
