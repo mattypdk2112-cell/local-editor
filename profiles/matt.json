@@ -1,0 +1,42 @@
+{
+  "_note": "Matt / Converter Studios house look. Locked 2026-08-18 by rendering candidates and picking. See memory reel-render-spec.",
+  "aspect": "4:3",
+  "crop_x": 480,
+  "height": 1080,
+  "captions": true,
+  "caption_font": "Montserrat Black",
+  "caption_color": "FFFFFF",
+  "accent": "FFFFFF",
+  "no_highlight": true,
+  "no_uppercase": true,
+  "caption_size": 9.1,
+  "caption_stroke": 0,
+  "caption_shadow": 0,
+  "caption_x": 6.1,
+  "caption_y": 44.6,
+  "words_per_line": 3,
+  "strip_filler": true,
+  "bad_takes": true,
+  "fix": [
+    "Heating and Calling=heating and cooling",
+    "heating and calling=heating and cooling",
+    "croaked=cooked",
+    "misses=missus",
+    "come and vault=comment VAULT",
+    "Homozy=Hormozi",
+    "air receptionist=AI receptionist",
+    "those Visitors=those businesses",
+    "People are cooking dinner=before you're cooking dinner",
+    "Tuesdays=Tuesday",
+    "Crooked=cooked",
+    "crooked=cooked"
+  ],
+  "vocab": [
+    "Ava",
+    "Melbourne",
+    "hydronic",
+    "Converter Studios",
+    "receptionist",
+    "Hormozi"
+  ]
+}
