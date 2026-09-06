@@ -166,3 +166,126 @@ def detect_bad_takes(
 def estimate_cost(usage: dict, backend_name: str = "gemini") -> float:
     """What that pass cost. Priced per backend over in llm.py."""
     return llm.estimate_cost(usage, backend_name)
+
+
+def stutters(words: list[dict], *, min_len: int = 1, max_len: int = 8,
+             gap: float = 1.2) -> list[dict]:
+    """Back-to-back repeats in an ASSEMBLED cut. [{start, end, text, n}].
+
+    This is a check on the render, not on the source, and it exists because the
+    source transcript cannot be trusted to reveal a repeated take. On Matt's
+    2026-09-06 editor take whisper logged the hook's first word at 33.16s; the
+    clean take actually starts at 34.84s, and it hid the 1.68s of the PREVIOUS
+    attempt inside a single 1.62s-long token ("open"). A range planned off those
+    word times shipped "There's a free there's a free open source editor" and
+    neither the retake sweep nor --strip-filler saw it, because both read the
+    same lying transcript.
+
+    Re-transcribing the finished file and looking for an n-gram immediately
+    followed by itself catches that class outright, whatever produced it: a bad
+    script match, a hand-picked range, or a retake the LLM pass missed.
+    """
+    norms = [_norm(w["word"]) for w in words]
+    out: list[dict] = []
+    i = 0
+    while i < len(norms):
+        hit = None
+        for n in range(max_len, min_len - 1, -1):
+            a, b = norms[i:i + n], norms[i + n:i + 2 * n]
+            if len(b) < n or a != b or not all(a):
+                continue
+            # A deliberate repeat for emphasis lands immediately; a stray take has
+            # a beat of air between the two halves. Both are worth showing, so the
+            # gap only decides nothing here — it is reported so the caller can see.
+            hit = n
+            break
+        if hit:
+            span = words[i:i + 2 * hit]
+            out.append({"start": round(float(span[0]["start"]), 2),
+                        "end": round(float(span[-1]["end"]), 2),
+                        # where the SECOND copy begins. This is the repair point:
+                        # everything before it is the take that should not be here.
+                        "mid": round(float(span[hit]["start"]), 2),
+                        "text": " ".join(w["word"].strip() for w in span),
+                        "n": hit})
+            i += 2 * hit
+        else:
+            i += 1
+    return out
+
+
+def map_to_source(ranges: list[list[float]], a: float, b: float) -> list[list[float]]:
+    """Interval [a, b) on the CUT timeline -> the source spans it is made of."""
+    out, acc = [], 0.0
+    for rs, re_ in ranges:
+        d = re_ - rs
+        lo, hi = max(a, acc), min(b, acc + d)
+        if hi > lo:
+            out.append([rs + (lo - acc), rs + (hi - acc)])
+        acc += d
+    return out
+
+
+def repeat_spans(ranges: list[list[float]], reps: list[dict], *,
+                 head_window: float = 0.60, pad: float = 0.04
+                 ) -> tuple[list[list[float]], list[str]]:
+    """The CUT-timeline spans to delete: the FIRST copy of each repeat.
+
+    Reporting a repeat is not fixing one. Every repeat that reaches a render is
+    the same shape — one copy too many — so the repair is one operation: map
+    [start, mid) from the cut timeline back onto the source ranges and subtract
+    it. Doing it in cut time is what makes this general. The three failures on
+    Matt's 2026-09-06 take all fall out of it:
+
+      * head of a range   "There's a free | there's a free open source editor"
+                          (whisper put the hook 1.68s early, so the range opened
+                          on the tail of the previous attempt)
+      * across a seam     "...half a second and" + "and Every um"
+      * a false start     "but I" + "I took one and rebuilt it"
+
+    A repeat sitting well inside a single range with no seam near it is the
+    speaker actually saying it twice, which is a script decision, so that one is
+    reported and left alone.
+    """
+    seams, acc = [], 0.0
+    for a, b in ranges:
+        seams.append(acc)
+        acc += b - a
+    seams.append(acc)
+
+    drop: list[list[float]] = []
+    notes: list[str] = []
+    for rep in reps:
+        first = [rep["start"], max(rep["start"], rep["mid"] - pad)]
+        near_seam = any(abs(s - rep["start"]) <= head_window
+                        or first[0] <= s <= rep["mid"] for s in seams)
+        if not near_seam:
+            # A doubled single word away from every join is just how people talk
+            # ("that that"). Only say something when it is long enough to notice.
+            if rep["n"] >= 2:
+                notes.append(f"repeat at {rep['start']:.2f}s ({rep['text']!r}) is mid-range "
+                             f"with no join near it — said twice on purpose, left alone")
+            continue
+        if first[1] - first[0] < 0.05:
+            continue
+        drop.append(first)
+        notes.append(f"dropped the first copy of {rep['text']!r} "
+                     f"({first[1] - first[0]:.2f}s at {rep['start']:.2f}s in the cut)")
+
+    return drop, notes
+
+
+def _subtract(ranges: list[list[float]], spans: list[list[float]]) -> list[list[float]]:
+    out = [list(r) for r in ranges]
+    for sa, sb in sorted(spans):
+        nxt = []
+        for a, b in out:
+            if sb <= a or sa >= b:
+                nxt.append([a, b])
+                continue
+            if sa > a:
+                nxt.append([a, min(sa, b)])
+            if sb < b:
+                nxt.append([max(sb, a), b])
+        out = nxt
+    return [[round(a, 3), round(b, 3)] for a, b in out if b - a > 0]
