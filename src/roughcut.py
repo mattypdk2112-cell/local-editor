@@ -317,6 +317,39 @@ def ranges_from_words(
     return merged
 
 
+def realign_pre_gaps(
+    old_ranges: list[list[float]], new_ranges: list[list[float]],
+    pre_gaps: list[float] | None, tol: float = 1.0,
+) -> list[float]:
+    """Carry cadence beats onto a reshaped range list, keyed by TIME not index.
+
+    `pre_gaps` is index-aligned to its own `ranges`, but every pass after the cut
+    (retake subtraction, tighten, interior carve, orphan drop) rewrites ranges by
+    time: entries split, shrink and disappear. Re-using the old list by index then
+    puts a beat on the wrong segment, and a list left SHORTER than ranges crashes
+    the consumers outright, since they index pre_gaps while bounding on ranges.
+
+    A beat follows the range it was attached to, matched to the new range whose
+    start is nearest the old one within `tol` (tighten legitimately moves an edge
+    by up to ~0.9s of head slop when it snaps to measured speech). A beat whose
+    range was dropped entirely goes with it. Never lands on range 0, same rule as
+    the producer: there is nothing to hold on before the opening frame.
+    """
+    out = [0.0] * len(new_ranges)
+    for i, beat in enumerate((pre_gaps or [])[:len(old_ranges)]):
+        if beat <= 0:
+            continue
+        start = old_ranges[i][0]
+        best, best_d = None, tol
+        for j, (s, _e) in enumerate(new_ranges):
+            d = abs(s - start)
+            if d <= best_d:
+                best, best_d = j, d
+        if best:  # 0 is falsy on purpose — no beat before the first range
+            out[best] = max(out[best], beat)
+    return out
+
+
 def build_timemap(ranges: list[list[float]], pre_gaps: list[float] | None = None):
     """Return a function mapping ORIGINAL time -> NEW (post-concat) time.
 
@@ -325,7 +358,8 @@ def build_timemap(ranges: list[list[float]], pre_gaps: list[float] | None = None
     burned captions stay in sync with the rendered hold. Returns None for a time
     that falls inside a removed gap.
     """
-    pre_gaps = pre_gaps or [0.0] * len(ranges)
+    pre_gaps = list(pre_gaps or [])
+    pre_gaps += [0.0] * (len(ranges) - len(pre_gaps))
     offsets = []  # (orig_start, orig_end, new_start)
     acc = 0.0
     for k, (s, e) in enumerate(ranges):
@@ -358,6 +392,13 @@ def drop_orphan_ranges(ranges: list[list[float]], words: list[dict], *,
         toks = [_norm(w["word"]) for w in words
                 if a - 0.02 <= (w["start"] + w["end"]) / 2 <= b + 0.02]
         toks = [t for t in toks if t]
+        # A range holding NO words at all is pure noise — `tighten` can leave one
+        # behind when it snaps a blade (0.24s of nothing survived into Matt's
+        # 2026-09-06 cut, because this test used to start `if toks and ...` and an
+        # empty list is falsy, so the wordless case fell straight through).
+        if not toks and (b - a) <= max_dur:
+            dropped.append({"range": [a, b], "words": []})
+            continue
         if toks and len(toks) <= 2 and (b - a) <= max_dur and all(t in _CONNECTIVE for t in toks):
             dropped.append({"range": [a, b], "words": toks})
             continue

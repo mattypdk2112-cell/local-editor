@@ -33,6 +33,7 @@ from src import scriptmatch as scriptmatch_mod  # noqa: E402
 from src import titlecard as titlecard_mod  # noqa: E402
 from src import transcribe as transcribe_mod  # noqa: E402
 from src import geometry as geometry_mod  # noqa: E402
+from src import util as util_mod  # noqa: E402
 from src.util import (merge_overlaps, close_intraword_gaps, boundary_report, detect_silence, dump_json, fmt_secs, load_json,  # noqa: E402
                       next_versioned_path, probe)
 
@@ -47,6 +48,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--music", type=Path, default=None, help="background track (mixed at -23dB)")
     p.add_argument("--model", default="small", help="faster-whisper size: tiny/base/small/medium")
     p.add_argument("--fresh", action="store_true", help="ignore any cached transcript, re-run whisper")
+    p.add_argument("--no-repair-transcript", action="store_true",
+                   help="skip re-decoding words whose logged duration is impossible")
+    p.add_argument("--breath-trim", action=argparse.BooleanOptionalAction, default=True,
+                   help="also cut breath-level dead air, the pauses that sit ABOVE the silence\n"
+                        "                        floor because the take is loud. Guarded by a voicing test so a\n"
+                        "                        quiet WORD is never bladed. (default: on)")
+    p.add_argument("--breath-offset", type=float, default=speech_mod.BREATH_OFFSET_DB,
+                   help="breath gate, dB below the cut's speech level (default -10.5)")
+    p.add_argument("--verify", action=argparse.BooleanOptionalAction, default=True,
+                   help="re-transcribe the assembled audio and remove repeats the SOURCE\n"
+                        "                        transcript hid. (default: on)")
+    p.add_argument("--no-repair", action="store_true",
+                   help="report what --verify finds but do not re-cut to remove it")
     p.add_argument("--max-gap", type=float, default=0.2, help="cut silences longer than this (s)")
     p.add_argument("--words-per-line", type=int, default=3, help="caption words shown per line")
     p.add_argument("--accent", default="FFFFFF", help="caption spoken-word/highlight colour (RRGGBB hex, default white)")
@@ -256,6 +270,23 @@ def main() -> int:
     sil_starts: list[float] = []
     sil_ends: list[float] = []
     wav = project / "audio.wav"
+
+    # The source transcript is not trustworthy where whisper stretched a token. A
+    # four-letter word cannot take 1.6s to say; when one is logged that long it has
+    # swallowed something, almost always a repeated attempt. Re-decoding just those
+    # windows, on their own, gets the real words back — and it is what stops a range
+    # being planned on top of a take that should not be in the cut.
+    if not args.no_repair_transcript:
+        fixed, rep = transcribe_mod.repair_stretched(
+            transcript["words"], wav, model_size=args.model)
+        for r in rep:
+            print(f"  transcript repair {r['at']:.2f}s: {r['was']!r} ({r['dur']}s) "
+                  f"was really {r['now']!r}")
+        if rep:
+            transcript["words"] = fixed
+            print(f"  {len(rep)} stretched word(s) re-decoded, "
+                  f"{len(fixed)} words now")
+
     if not args.no_cut and wav.exists():
         sil_starts, sil_ends = detect_silence(wav)
         print(f"  {len(sil_starts)} audio silence points (cuts snap to these)")
@@ -584,6 +615,90 @@ def main() -> int:
         print(" ".join(w["word"] for w in kept))
         print()
         return 0
+
+    # MEASURE THE AUDIO THAT WILL SHIP, BEFORE PAYING FOR A VIDEO ENCODE.
+    # Two things can only be known from the assembled cut, never from the plan:
+    #
+    #   1. Repeats. The source transcript is not evidence about the cut. Whisper
+    #      hides a repeated take inside a stretched token — on one take it logged
+    #      the opening word 1.68s early and swallowed the previous attempt in a
+    #      single 1.62s "word" — so every pass upstream reads the same lie and
+    #      reports the cut clean while it opens "There's a free there's a free".
+    #   2. Breath-level dead air. The gate is a fraction of how loud the speaker
+    #      is, and "how loud" is only true after loudnorm. Measured over the very
+    #      same ranges, the raw take put the gate at -44.1 dBFS where the
+    #      normalised cut puts it at -29.4, and the pass found 0.24s instead of
+    #      the 9.76s that was really in there.
+    #
+    # An AUDIO-ONLY concat answers both in seconds, so the video is encoded once
+    # instead of encoded, measured and encoded again.
+    if (args.verify or args.breath_trim) and not args.no_cut and cut["ranges"] and wav.exists():
+        print("\n[2.95] measuring the assembled audio")
+        proxy = project / "cut_proxy.wav"
+        fg = []
+        for i, (ra, rb) in enumerate(cut["ranges"]):
+            fg.append(f"[0:a]atrim=start={ra}:end={rb},asetpts=PTS-STARTPTS[p{i}];")
+        fg.append("".join(f"[p{i}]" for i in range(len(cut["ranges"])))
+                  + f"concat=n={len(cut['ranges'])}:v=0:a=1[c];")
+        fg.append("[c]loudnorm=I=-14:TP=-1.5:LRA=11[out]"
+                  if not args.no_normalize else "[c]anull[out]")
+        (project / "proxy_fg.txt").write_text("\n".join(fg))
+        util_mod.run(["ffmpeg", "-y", "-v", "error", "-i", str(wav),
+                      "-filter_complex_script", str(project / "proxy_fg.txt"),
+                      "-map", "[out]", "-ac", "1", "-ar", "16000",
+                      "-c:a", "pcm_s16le", str(proxy)])
+
+        cut_ranges, acc = [], 0.0
+        for ra, rb in cut["ranges"]:
+            cut_ranges.append([acc, acc + (rb - ra)])
+            acc += rb - ra
+
+        drop = []
+        if args.breath_trim:
+            spans, gate, spared = speech_mod.unvoiced_gaps(proxy, cut_ranges,
+                                                           offset=args.breath_offset)
+            drop += spans
+            print(f"  breath-level dead air: {sum(y - x for x, y in spans):.2f}s "
+                  f"in {len(spans)} stretch(es), gate {gate:.1f} dBFS")
+            if spared:
+                print(f"  left {sum(y - x for x, y in spared):.2f}s alone — {len(spared)} "
+                      f"stretch(es) under the gate but voiced or on a join")
+
+        if args.verify:
+            # NO vocab here, deliberately. The glossary is an initial_prompt and
+            # whisper obeys it by TIDYING what it hears: primed with a glossary it
+            # decoded "There's a free open source editor" from audio that says
+            # "There's a free there's a free open source editor", and this pass
+            # reported the cut clean. Same file, same model, vocab the only
+            # variable: 0 repeats with it, 2 without.
+            vtx = transcribe_mod.transcribe_cut(
+                proxy, project, model_size=args.model, vocab=None)
+            reps = badtakes_mod.stutters(vtx["words"])
+            if not reps:
+                print("  no repeats in the assembled audio")
+            for r in reps:
+                print(f"  repeat at {r['start']:.2f}s: {r['text']!r}")
+            if reps:
+                spans, notes = badtakes_mod.repeat_spans(cut["ranges"], reps)
+                drop += spans
+                for n in notes:
+                    print(f"  {n}")
+
+        if drop and not args.no_repair:
+            src_spans = []
+            for x, y in drop:
+                src_spans += badtakes_mod.map_to_source(cut["ranges"], x, y)
+            fixed = badtakes_mod._subtract(cut["ranges"], src_spans)
+            fixed = [r for r in fixed if r[1] - r[0] >= 0.12]
+            fixed, orph = roughcut_mod.drop_orphan_ranges(fixed, transcript["words"])
+            for o in orph:
+                print(f"  dropped orphan range {o['range'][0]:.2f}-{o['range'][1]:.2f} "
+                      f"— only {' '.join(o['words'])!r}")
+            held = cut["kept_duration"]
+            cut["ranges"] = fixed
+            cut["kept_duration"] = round(sum(y - x for x, y in fixed), 3)
+            cut["cuts"] = max(0, len(fixed) - 1)
+            print(f"  {held:.2f}s -> {cut['kept_duration']:.2f}s before the encode")
 
     print("\n[4/4] assemble")
     music = args.music.expanduser().resolve() if args.music else None

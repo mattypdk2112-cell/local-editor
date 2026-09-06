@@ -4,3 +4,4 @@ projects/
 __pycache__/
 *.pyc
 .DS_Store
+models/

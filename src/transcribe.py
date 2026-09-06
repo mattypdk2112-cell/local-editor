@@ -95,6 +95,14 @@ def transcribe_cut(video: Path, project: Path, *, model_size: str = "small",
 
     VAD is off here: the cut has already had its silence removed, so VAD's only
     remaining effect would be to fuse words across the joins.
+
+    `vocab` is an initial_prompt, and whisper does not treat it as a spelling hint
+    only — it tidies what it hears to match. Primed with Matt's glossary it decoded
+    "There's a free open source editor" from audio that says "There's a free
+    there's a free open source editor" (measured 2026-09-07, same file and model,
+    vocab the only variable: 0 repeats with it, 2 without). So pass vocab when you
+    are about to BURN the words in, and pass None when you are checking whether the
+    cut is clean. Those are different jobs and they want different settings.
     """
     from faster_whisper import WhisperModel
 
@@ -180,3 +188,84 @@ def apply_fixes(words: list[dict], pairs: list[str]) -> tuple[list[dict], list[s
             out.append(words[i])
             i += 1
     return out, applied
+
+
+# --- transcript repair (2026-09-07) -----------------------------------------
+# A word cannot take 1.6 seconds to say when it is four letters long. When whisper
+# logs one that does, it has not slowed down — it has SWALLOWED something, usually
+# a repeated attempt, and emitted the region as a single stretched token.
+#
+# Measured on Matt's 2026-09-06 editor take: 425 words, median duration 0.24s, p90
+# 0.52s, and 14 words (3%) over 0.85s — every one of them a short function word
+# ("and", "I", "on", "or", "so", "open"). Those 14 are not a curiosity, they are
+# where every bad cut in that reel came from. "open" logged 34.13-35.75 is the
+# 1.68s of a previous take that shipped as "There's a free there's a free open
+# source editor"; "music" logged at 117.96 is why the wrong take of the music line
+# was chosen; "I" at 40.86 is the "but I / I took one" false start.
+#
+# Re-transcribing just that window, on its own, returns the truth: isolated,
+# 32.5-39.5 decodes cleanly and puts the good take's first word at 34.84 rather
+# than 33.16. Whisper is accurate on a short window and unreliable across a long
+# one, so the repair is to ask it again, narrowly.
+STRETCHED_S = 0.85          # a word logged longer than this is hiding something
+REPAIR_PAD = 0.25           # context either side so the window decodes in context
+
+
+def stretched_words(words: list[dict], *, limit: float = STRETCHED_S) -> list[int]:
+    """Indices of words whose logged duration is not physically plausible."""
+    return [i for i, w in enumerate(words) if (w["end"] - w["start"]) > limit]
+
+
+def repair_stretched(words: list[dict], wav: Path, *, model_size: str = "small",
+                     language: str = "en", limit: float = STRETCHED_S,
+                     pad: float = REPAIR_PAD) -> tuple[list[dict], list[dict]]:
+    """Re-decode each stretched word's window on its own. (words, report).
+
+    No initial_prompt and no VAD: this pass exists to hear what is really in the
+    audio, and a glossary makes whisper tidy a repeat away (see `transcribe_cut`).
+    """
+    from faster_whisper import WhisperModel
+
+    bad = stretched_words(words, limit=limit)
+    if not bad:
+        return words, []
+
+    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    out = list(words)
+    report: list[dict] = []
+    for i in reversed(bad):                       # right to left: indices stay valid
+        w = out[i]
+        a = max(0.0, w["start"] - pad)
+        b = w["end"] + pad
+        seg_words = _decode_window(model, wav, a, b, language)
+        inner = [x for x in seg_words
+                 if x["start"] >= w["start"] - pad / 2 and x["end"] <= w["end"] + pad / 2]
+        if len(inner) > 1:
+            report.append({"at": round(w["start"], 2), "was": w["word"],
+                           "dur": round(w["end"] - w["start"], 2),
+                           "now": " ".join(x["word"] for x in inner)})
+            out[i:i + 1] = inner
+    return out, list(reversed(report))
+
+
+def _decode_window(model, wav: Path, a: float, b: float, language: str) -> list[dict]:
+    """Whisper on [a, b) of `wav`, returned on the ORIGINAL timeline."""
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+        clip = Path(tf.name)
+    run(["ffmpeg", "-y", "-v", "error", "-ss", f"{a:.3f}", "-to", f"{b:.3f}",
+         "-i", str(wav), "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(clip)])
+    segments, _ = model.transcribe(str(clip), language=language, word_timestamps=True,
+                                   vad_filter=False, beam_size=5,
+                                   condition_on_previous_text=False)
+    out = []
+    for seg in segments:
+        for x in (seg.words or []):
+            tok = x.word.strip()
+            if tok:
+                out.append({"word": tok, "start": round(a + float(x.start), 3),
+                            "end": round(a + float(x.end), 3),
+                            "prob": round(float(x.probability or 0), 3)})
+    clip.unlink(missing_ok=True)
+    return out
