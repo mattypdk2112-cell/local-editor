@@ -10,6 +10,23 @@ from pathlib import Path
 
 from .util import run
 
+# --- one model per process (2026-09-07) --------------------------------------
+# A single run loads the speech model four separate times: the source pass, the
+# stretched-word repair, and once per verify pass over the assembled cut. Each
+# load costs ~20s on an M1, so ~80s of a ~9 minute run is spent building the same
+# object again. It is stateless for our purposes, so build it once and hand the
+# same one out.
+_MODELS: dict[str, object] = {}
+
+
+def get_model(model_size: str = "small"):
+    from faster_whisper import WhisperModel
+
+    if model_size not in _MODELS:
+        _MODELS[model_size] = WhisperModel(model_size, device="cpu", compute_type="int8")
+    return _MODELS[model_size]
+
+
 
 def extract_audio(video: Path, out_wav: Path) -> Path:
     run([
@@ -104,13 +121,11 @@ def transcribe_cut(video: Path, project: Path, *, model_size: str = "small",
     are about to BURN the words in, and pass None when you are checking whether the
     cut is clean. Those are different jobs and they want different settings.
     """
-    from faster_whisper import WhisperModel
-
     wav = project / "cut_audio.wav"
     run(["ffmpeg", "-y", "-v", "error", "-i", str(video),
          "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)])
 
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    model = get_model(model_size)
     terms = [t.strip() for t in (vocab or []) if t and t.strip()]
     segments, _ = model.transcribe(
         str(wav), language=language, word_timestamps=True,
@@ -211,6 +226,10 @@ STRETCHED_S = 0.85          # a word logged longer than this is hiding something
 REPAIR_PAD = 0.25           # context either side so the window decodes in context
 
 
+def _norm_tok(word: str) -> str:
+    return re.sub(r"[^a-z0-9']", "", word.lower())
+
+
 def stretched_words(words: list[dict], *, limit: float = STRETCHED_S) -> list[int]:
     """Indices of words whose logged duration is not physically plausible."""
     return [i for i, w in enumerate(words) if (w["end"] - w["start"]) > limit]
@@ -224,13 +243,11 @@ def repair_stretched(words: list[dict], wav: Path, *, model_size: str = "small",
     No initial_prompt and no VAD: this pass exists to hear what is really in the
     audio, and a glossary makes whisper tidy a repeat away (see `transcribe_cut`).
     """
-    from faster_whisper import WhisperModel
-
     bad = stretched_words(words, limit=limit)
     if not bad:
         return words, []
 
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    model = get_model(model_size)
     out = list(words)
     report: list[dict] = []
     for i in reversed(bad):                       # right to left: indices stay valid
@@ -240,6 +257,19 @@ def repair_stretched(words: list[dict], wav: Path, *, model_size: str = "small",
         seg_words = _decode_window(model, wav, a, b, language)
         inner = [x for x in seg_words
                  if x["start"] >= w["start"] - pad / 2 and x["end"] <= w["end"] + pad / 2]
+        # The re-decode must still contain the word it is splitting. A stretched
+        # token hides EXTRA words around the one whisper logged, so the original
+        # has to survive; when it does not, the window was quiet and the decoder
+        # invented something. That is how "for watching." — a YouTube sign-off
+        # that is nowhere in the audio — replaced 'on' at 27.25s and entered the
+        # transcript. Measured 2026-09-07.
+        target = _norm_tok(w["word"])
+        if len(inner) > 1 and target and target not in {_norm_tok(x["word"]) for x in inner}:
+            report.append({"at": round(w["start"], 2), "was": w["word"],
+                           "dur": round(w["end"] - w["start"], 2),
+                           "now": " ".join(x["word"] for x in inner),
+                           "rejected": True})
+            continue
         if len(inner) > 1:
             report.append({"at": round(w["start"], 2), "was": w["word"],
                            "dur": round(w["end"] - w["start"], 2),
@@ -256,6 +286,12 @@ def _decode_window(model, wav: Path, a: float, b: float, language: str) -> list[
         clip = Path(tf.name)
     run(["ffmpeg", "-y", "-v", "error", "-ss", f"{a:.3f}", "-to", f"{b:.3f}",
          "-i", str(wav), "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(clip)])
+    # beam 5, deliberately. beam 1 is 31% faster on the whole file (61.5s against
+    # 88.9s, measured) but these windows are short and quiet, which is exactly
+    # where a greedy decode hallucinates: at beam 1 the window around 'on' at
+    # 27.25s came back as "for watching.", a YouTube sign-off that is nowhere in
+    # the audio, and it went into the transcript. The repair is cached now, so it
+    # is paid once per project and the speed is not worth the risk.
     segments, _ = model.transcribe(str(clip), language=language, word_timestamps=True,
                                    vad_filter=False, beam_size=5,
                                    condition_on_previous_text=False)

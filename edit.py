@@ -278,16 +278,30 @@ def main() -> int:
     # swallowed something, almost always a repeated attempt. Re-decoding just those
     # windows, on their own, gets the real words back — and it is what stops a range
     # being planned on top of a take that should not be in the cut.
-    if not args.no_repair_transcript:
+    # The repair re-decodes ~14 short windows, which is ~60s, and it is
+    # deterministic for a given transcript — so cache it beside the transcript
+    # rather than paying it again on every re-run of the same project.
+    repaired_cache = project / "transcript_repaired.json"
+    if not args.no_repair_transcript and repaired_cache.exists() and not args.fresh:
+        prev = load_json(repaired_cache)
+        if prev.get("words"):
+            transcript["words"] = prev["words"]
+            print(f"  reusing repaired transcript ({len(prev['words'])} words)")
+    elif not args.no_repair_transcript:
         fixed, rep = transcribe_mod.repair_stretched(
             transcript["words"], wav, model_size=args.model)
         for r in rep:
-            print(f"  transcript repair {r['at']:.2f}s: {r['was']!r} ({r['dur']}s) "
-                  f"was really {r['now']!r}")
+            if r.get("rejected"):
+                print(f"  transcript repair {r['at']:.2f}s: rejected {r['now']!r} "
+                      f"— it dropped the word {r['was']!r} it was meant to split")
+            else:
+                print(f"  transcript repair {r['at']:.2f}s: {r['was']!r} ({r['dur']}s) "
+                      f"was really {r['now']!r}")
         if rep:
             transcript["words"] = fixed
             print(f"  {len(rep)} stretched word(s) re-decoded, "
                   f"{len(fixed)} words now")
+        dump_json(repaired_cache, {"words": transcript["words"]})
 
     if not args.no_cut and wav.exists():
         sil_starts, sil_ends = detect_silence(wav)
