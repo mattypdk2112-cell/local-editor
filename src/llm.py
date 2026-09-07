@@ -131,6 +131,55 @@ def resolve_backend(project_root, *, prefer_model: str | None = None) -> dict | 
     return None
 
 
+def resolve_backends(project_root, *, prefer_model: str | None = None) -> list[dict]:
+    """Every backend that could answer, cheapest first.
+
+    resolve_backend returns only the winner, which is wrong the moment the winner
+    turns out to be unusable. Claude Code being INSTALLED is not the same as being
+    logged in: on a headless Mac Mini the binary was there, resolve_backend picked
+    it, and the call came back `Not logged in - Please run /login`, which took the
+    whole edit down with a traceback instead of trying the API key sitting right
+    next to it. Callers should walk this list.
+    """
+    out: list[dict] = []
+    if claude_cli():
+        out.append({"name": "claude_cli", "model": prefer_model or DEFAULT_CLAUDE_MODEL})
+    for name in OPENROUTER_KEYS:
+        k = load_env_key(name, project_root=project_root)
+        if k:
+            out.append({"name": "openrouter", "key": k,
+                        "model": prefer_model or DEFAULT_OR_MODEL})
+            break
+    for name in GEMINI_KEYS:
+        k = load_env_key(name, project_root=project_root)
+        if k:
+            out.append({"name": "gemini", "key": k, "model": DEFAULT_GEMINI_MODEL})
+            break
+    return out
+
+
+def complete_json_any(backends: list[dict], prompt: str, **kw):
+    """First backend that actually answers. (parsed, usage, backend_used).
+
+    A backend can fail for reasons resolve_backend cannot see from the outside —
+    not logged in, quota gone, network down. Falling through to the next one is
+    the difference between a slightly more expensive edit and no edit at all.
+    """
+    last = None
+    for i, b in enumerate(backends):
+        try:
+            parsed, usage = complete_json_retry(b, prompt, **kw)
+            return parsed, usage, b
+        except Exception as e:  # noqa: BLE001
+            last = e
+            nxt = describe(backends[i + 1]) if i + 1 < len(backends) else None
+            print(f"  {describe(b)} could not answer ({str(e)[:90]})"
+                  + (f" — falling back to {nxt}" if nxt else ""))
+    if last:
+        raise last
+    raise RuntimeError("no LLM backend available")
+
+
 def no_backend_message() -> str:
     """One sentence, no traceback, when nothing can answer."""
     return ("this flag needs a model to think and none is available. Install Claude Code "

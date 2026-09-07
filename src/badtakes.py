@@ -12,8 +12,11 @@ with a clear message when nothing is available, so the flag never hard-fails a r
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from . import llm
+
+ROOT = Path(__file__).resolve().parent
 from .llm import load_env_key  # noqa: F401  (re-exported: callers still import it here)
 
 PROMPT = """You are a video editor's assistant. Below is a raw talking-head transcript with \
@@ -166,9 +169,15 @@ def detect_bad_takes(
     protect_spans = protect_spans or []
 
     # Low temperature: picking the keeper take is a judgement call, not a creative one.
-    parsed, usage = llm.complete_json_retry(
-        backend, PROMPT + _render_words(words), timeout=300.0, temperature=0.2,
+    # Walk every backend, not just the best one. Claude Code being INSTALLED is
+    # not the same as being logged in: on a headless box the binary was found,
+    # picked, and answered "Not logged in - Please run /login", which took the
+    # whole edit down instead of using the key sitting next to it.
+    chain = llm.resolve_backends(ROOT.parent) if backend is None else [backend]
+    parsed, usage, backend = llm.complete_json_any(
+        chain, PROMPT + _render_words(words), timeout=300.0, temperature=0.2,
     )
+
 
     n = len(words)
     removed: list[dict] = []
