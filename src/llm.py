@@ -93,7 +93,15 @@ def resolve_backend(project_root, *, prefer_model: str | None = None) -> dict | 
     """Pick who does the thinking. An explicit key beats the bundled default.
 
     Returns {name, key?, model} or None when there is nothing to call.
+
+    Claude Code goes FIRST because it is free: it rides the subscription the user
+    already has, where every other route bills a key per call. This used to check
+    for an OpenRouter key first, which meant anyone holding one silently paid for
+    a pass they could have run for nothing. A key is the fallback for someone with
+    no Claude Code installed, not the preference.
     """
+    if claude_cli():
+        return {"name": "claude_cli", "model": prefer_model or DEFAULT_CLAUDE_MODEL}
     for name in OPENROUTER_KEYS:
         k = load_env_key(name, project_root=project_root)
         if k:
@@ -103,8 +111,6 @@ def resolve_backend(project_root, *, prefer_model: str | None = None) -> dict | 
         k = load_env_key(name, project_root=project_root)
         if k:
             return {"name": "gemini", "key": k, "model": DEFAULT_GEMINI_MODEL}
-    if claude_cli():
-        return {"name": "claude_cli", "model": prefer_model or DEFAULT_CLAUDE_MODEL}
     return None
 
 
