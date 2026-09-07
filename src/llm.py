@@ -87,7 +87,7 @@ def resolve_backend(project_root, *, prefer_model: str | None = None) -> dict | 
         if k:
             return {"name": "gemini", "key": k, "model": DEFAULT_GEMINI_MODEL}
     if claude_cli():
-        return {"name": "claude_cli", "model": DEFAULT_CLAUDE_MODEL}
+        return {"name": "claude_cli", "model": prefer_model or DEFAULT_CLAUDE_MODEL}
     return None
 
 

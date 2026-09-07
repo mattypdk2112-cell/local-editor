@@ -88,9 +88,14 @@ def parse_args() -> argparse.Namespace:
                    help="highlight BOX colour behind the spoken word (RRGGBB); omit for coloured-text highlighting")
     p.add_argument("--strip-filler", action="store_true", help="drop um/uh from captions")
     p.add_argument("--aggressive-filler", action="store_true", help="also drop like/basically/etc")
-    p.add_argument("--bad-takes", action="store_true",
-                   help="also cut retakes/false-starts/spoken directions (thinks with the "
-                        "Claude Code you already have — no API key)")
+    p.add_argument("--bad-takes", action=argparse.BooleanOptionalAction, default=True,
+                   help="cut retakes, false starts and spoken directions — the pass that\n"
+                        "                        decides WHICH take is the keeper. Thinks with the Claude Code\n"
+                        "                        you already have, no API key. Measured on a 3:44 raw take:\n"
+                        "                        1:00 with it, 1:43 of retakes without. (default: on;\n"
+                        "                        --no-bad-takes to skip, and it skips itself with no backend)")
+    p.add_argument("--llm-model", default=None,
+                   help="model for the thinking passes (e.g. haiku, sonnet). Default sonnet")
     p.add_argument("--script", type=Path, default=None,
                    help="intended script (.txt one beat per line, or .json) — align footage to it")
     p.add_argument("--deterministic", action="store_true",
@@ -409,7 +414,7 @@ def main() -> int:
         print(f"\n[+] bad-take detection — reusing cached {len(bad_spans)} span(s) "
               f"(deterministic; --fresh to redo)")
     elif args.bad_takes and not args.no_cut:
-        backend = llm_mod.resolve_backend(ROOT)
+        backend = llm_mod.resolve_backend(ROOT, prefer_model=args.llm_model)
         if not backend:
             print("\n[+] bad-take detection")
             print("  " + llm_mod.no_backend_message() + ". Skipping the bad-take pass.")
