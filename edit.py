@@ -48,6 +48,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--music", type=Path, default=None, help="background track (mixed at -23dB)")
     p.add_argument("--model", default="small", help="faster-whisper size: tiny/base/small/medium")
     p.add_argument("--fresh", action="store_true", help="ignore any cached transcript, re-run whisper")
+    p.add_argument("--verify-passes", type=int, default=3,
+                   help="how many times --verify may re-check and re-cut (default 3)")
     p.add_argument("--no-repair-transcript", action="store_true",
                    help="skip re-decoding words whose logged duration is impossible")
     p.add_argument("--breath-trim", action=argparse.BooleanOptionalAction, default=True,
@@ -598,6 +600,19 @@ def main() -> int:
     # 4 — assemble
     # Cut is final here. Check the EDGES before paying for an encode: "20/20 matched,
     # coverage 1.0" only means the text was found, not that the cut sounds clean.
+    # Detecting a mid-speech cut and only printing about it is not a fix: on
+    # 2026-09-07 the tool warned "1 cut(s) land mid-speech", encoded anyway, and
+    # shipped "To do, you don't have to use Terminal" because a removal ended one
+    # word short and the range opened on the orphaned "do". Snap the edge onto
+    # real silence first, then report only what could not be snapped.
+    if not args.no_cut:
+        snapped, snotes = util_mod.snap_to_pause(cut["ranges"], transcript["words"])
+        if snotes:
+            for n in snotes:
+                print(f"  {n}")
+            cut["ranges"] = snapped
+            cut["kept_duration"] = round(sum(b - a for a, b in snapped), 3)
+
     issues = boundary_report(cut["ranges"], transcript["words"])
     if issues:
         print(f"\n[!] {len(issues)} cut(s) land mid-speech and may be heard as a glitch:")
@@ -634,71 +649,91 @@ def main() -> int:
     # instead of encoded, measured and encoded again.
     if (args.verify or args.breath_trim) and not args.no_cut and cut["ranges"] and wav.exists():
         print("\n[2.95] measuring the assembled audio")
-        proxy = project / "cut_proxy.wav"
-        fg = []
-        for i, (ra, rb) in enumerate(cut["ranges"]):
-            fg.append(f"[0:a]atrim=start={ra}:end={rb},asetpts=PTS-STARTPTS[p{i}];")
-        fg.append("".join(f"[p{i}]" for i in range(len(cut["ranges"])))
-                  + f"concat=n={len(cut['ranges'])}:v=0:a=1[c];")
-        fg.append("[c]loudnorm=I=-14:TP=-1.5:LRA=11[out]"
-                  if not args.no_normalize else "[c]anull[out]")
-        (project / "proxy_fg.txt").write_text("\n".join(fg))
-        util_mod.run(["ffmpeg", "-y", "-v", "error", "-i", str(wav),
-                      "-filter_complex_script", str(project / "proxy_fg.txt"),
-                      "-map", "[out]", "-ac", "1", "-ar", "16000",
-                      "-c:a", "pcm_s16le", str(proxy)])
 
-        cut_ranges, acc = [], 0.0
-        for ra, rb in cut["ranges"]:
-            cut_ranges.append([acc, acc + (rb - ra)])
-            acc += rb - ra
+        def _proxy() -> Path:
+            """Audio-only concat of the current ranges, normalised like the render."""
+            fg = []
+            for i, (ra, rb) in enumerate(cut["ranges"]):
+                fg.append(f"[0:a]atrim=start={ra}:end={rb},asetpts=PTS-STARTPTS[p{i}];")
+            fg.append("".join(f"[p{i}]" for i in range(len(cut["ranges"])))
+                      + f"concat=n={len(cut['ranges'])}:v=0:a=1[c];")
+            fg.append("[c]loudnorm=I=-14:TP=-1.5:LRA=11[out]"
+                      if not args.no_normalize else "[c]anull[out]")
+            (project / "proxy_fg.txt").write_text("\n".join(fg))
+            out = project / "cut_proxy.wav"
+            util_mod.run(["ffmpeg", "-y", "-v", "error", "-i", str(wav),
+                          "-filter_complex_script", str(project / "proxy_fg.txt"),
+                          "-map", "[out]", "-ac", "1", "-ar", "16000",
+                          "-c:a", "pcm_s16le", str(out)])
+            return out
 
-        drop = []
-        if args.breath_trim:
-            spans, gate, spared = speech_mod.unvoiced_gaps(proxy, cut_ranges,
-                                                           offset=args.breath_offset)
-            drop += spans
-            print(f"  breath-level dead air: {sum(y - x for x, y in spans):.2f}s "
-                  f"in {len(spans)} stretch(es), gate {gate:.1f} dBFS")
-            if spared:
-                print(f"  left {sum(y - x for x, y in spared):.2f}s alone — {len(spared)} "
-                      f"stretch(es) under the gate but voiced or on a join")
-
-        if args.verify:
-            # NO vocab here, deliberately. The glossary is an initial_prompt and
-            # whisper obeys it by TIDYING what it hears: primed with a glossary it
-            # decoded "There's a free open source editor" from audio that says
-            # "There's a free there's a free open source editor", and this pass
-            # reported the cut clean. Same file, same model, vocab the only
-            # variable: 0 repeats with it, 2 without.
-            vtx = transcribe_mod.transcribe_cut(
-                proxy, project, model_size=args.model, vocab=None)
-            reps = badtakes_mod.stutters(vtx["words"])
-            if not reps:
-                print("  no repeats in the assembled audio")
-            for r in reps:
-                print(f"  repeat at {r['start']:.2f}s: {r['text']!r}")
-            if reps:
-                spans, notes = badtakes_mod.repeat_spans(cut["ranges"], reps)
-                drop += spans
-                for n in notes:
-                    print(f"  {n}")
-
-        if drop and not args.no_repair:
-            src_spans = []
+        def _apply(drop: list[list[float]]) -> None:
+            src: list[list[float]] = []
             for x, y in drop:
-                src_spans += badtakes_mod.map_to_source(cut["ranges"], x, y)
-            fixed = badtakes_mod._subtract(cut["ranges"], src_spans)
+                src += badtakes_mod.map_to_source(cut["ranges"], x, y)
+            fixed = badtakes_mod._subtract(cut["ranges"], src)
             fixed = [r for r in fixed if r[1] - r[0] >= 0.12]
             fixed, orph = roughcut_mod.drop_orphan_ranges(fixed, transcript["words"])
             for o in orph:
                 print(f"  dropped orphan range {o['range'][0]:.2f}-{o['range'][1]:.2f} "
                       f"— only {' '.join(o['words'])!r}")
-            held = cut["kept_duration"]
             cut["ranges"] = fixed
             cut["kept_duration"] = round(sum(y - x for x, y in fixed), 3)
             cut["cuts"] = max(0, len(fixed) - 1)
-            print(f"  {held:.2f}s -> {cut['kept_duration']:.2f}s before the encode")
+
+        started = cut["kept_duration"]
+
+        if args.breath_trim:
+            proxy = _proxy()
+            cut_ranges, acc = [], 0.0
+            for ra, rb in cut["ranges"]:
+                cut_ranges.append([acc, acc + (rb - ra)])
+                acc += rb - ra
+            spans, gate, spared = speech_mod.unvoiced_gaps(proxy, cut_ranges,
+                                                           offset=args.breath_offset)
+            print(f"  breath-level dead air: {sum(y - x for x, y in spans):.2f}s "
+                  f"in {len(spans)} stretch(es), gate {gate:.1f} dBFS")
+            if spared:
+                print(f"  left {sum(y - x for x, y in spared):.2f}s alone — {len(spared)} "
+                      f"stretch(es) under the gate but voiced or on a join")
+            if spans and not args.no_repair:
+                _apply(spans)
+
+        # Repeats need a LOOP, not a pass. Removing the first copy of a short
+        # repeat can uncover a longer one underneath that the earlier decode
+        # could not see: on a 2026-09-07 run, deleting "and you just and you
+        # just" left "and just copy the and just copy the" in the render, and a
+        # single pass reported the job done.
+        if args.verify:
+            for attempt in range(1, args.verify_passes + 1):
+                proxy = _proxy()
+                # NO vocab here, deliberately. The glossary is an initial_prompt
+                # and whisper obeys it by TIDYING what it hears: primed with one
+                # it decoded "There's a free open source editor" from audio that
+                # says "There's a free there's a free open source editor". Same
+                # file, same model, vocab the only variable: 0 repeats with it,
+                # 2 without.
+                vtx = transcribe_mod.transcribe_cut(
+                    proxy, project, model_size=args.model, vocab=None)
+                reps = badtakes_mod.stutters(vtx["words"])
+                if not reps:
+                    print(f"  no repeats in the assembled audio"
+                          + (f" (pass {attempt})" if attempt > 1 else ""))
+                    break
+                for r in reps:
+                    print(f"  repeat at {r['start']:.2f}s: {r['text']!r}")
+                spans, notes = badtakes_mod.repeat_spans(cut["ranges"], reps)
+                for n in notes:
+                    print(f"  {n}")
+                if not spans or args.no_repair:
+                    break
+                _apply(spans)
+            else:
+                print(f"  still not clean after {args.verify_passes} passes — "
+                      f"the rest is in the take, not the cut")
+
+        if cut["kept_duration"] != started:
+            print(f"  {started:.2f}s -> {cut['kept_duration']:.2f}s before the encode")
 
     print("\n[4/4] assemble")
     music = args.music.expanduser().resolve() if args.music else None

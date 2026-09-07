@@ -69,11 +69,44 @@ def _line_bounds(words: list[dict], idx: int, *, gap: float = 0.45, max_words: i
     return (start, end)
 
 
-def first_line_word_span(words: list[dict]) -> tuple[int, int] | None:
-    """The hook = the first spoken line (word 0 to the first real pause)."""
+def first_line_word_span(words: list[dict], *, overlap: float = 0.6
+                         ) -> tuple[int, int] | None:
+    """The hook, protected on its LAST take rather than its first.
+
+    This used to return word 0 to the first pause, which is the first ATTEMPT at
+    the hook, and on any real take that is a false start. The bad-take pass would
+    correctly flag "four earlier false-start attempts at the opening line", this
+    guard would veto the removal, and the render shipped with the hook said twice:
+    "There's a free open source editor on github, there's a free open source
+    editor that cuts your entire reels on your laptop." Measured 2026-09-07 on a
+    fresh clone.
+
+    `cta_word_spans` below already had this right, and says why in its own
+    docstring: protect the last delivery, because the earlier ones are the
+    retakes you are trying to remove. Same rule, same reason, applied to the hook.
+
+    Takes are never word-identical, so the match is on token overlap rather than
+    equality: the last line that shares `overlap` of the opening line's words is
+    the one that survives.
+    """
     if not words:
         return None
-    return _line_bounds(words, 0)
+    a, b = _line_bounds(words, 0)
+    toks = {_norm(w["word"]) for w in words[a:b + 1]}
+    toks.discard("")
+    if len(toks) < 3:
+        return a, b
+
+    best = (a, b)
+    i = b + 1
+    while i < len(words):
+        la, lb = _line_bounds(words, i)
+        line = {_norm(w["word"]) for w in words[la:lb + 1]}
+        line.discard("")
+        if line and len(toks & line) / len(toks) >= overlap:
+            best = (la, lb)
+        i = lb + 1
+    return best
 
 
 def cta_word_spans(words: list[dict], cta_terms: list[str]) -> list[tuple[int, int]]:
@@ -133,7 +166,7 @@ def detect_bad_takes(
     protect_spans = protect_spans or []
 
     # Low temperature: picking the keeper take is a judgement call, not a creative one.
-    parsed, usage = llm.complete_json(
+    parsed, usage = llm.complete_json_retry(
         backend, PROMPT + _render_words(words), timeout=300.0, temperature=0.2,
     )
 
@@ -227,7 +260,8 @@ def map_to_source(ranges: list[list[float]], a: float, b: float) -> list[list[fl
 
 
 def repeat_spans(ranges: list[list[float]], reps: list[dict], *,
-                 head_window: float = 0.60, pad: float = 0.04
+                 head_window: float = 0.60, pad: float = 0.04,
+                 deliberate_n: int = 3
                  ) -> tuple[list[list[float]], list[str]]:
     """The CUT-timeline spans to delete: the FIRST copy of each repeat.
 
@@ -259,13 +293,20 @@ def repeat_spans(ranges: list[list[float]], reps: list[dict], *,
         first = [rep["start"], max(rep["start"], rep["mid"] - pad)]
         near_seam = any(abs(s - rep["start"]) <= head_window
                         or first[0] <= s <= rep["mid"] for s in seams)
-        if not near_seam:
-            # A doubled single word away from every join is just how people talk
-            # ("that that"). Only say something when it is long enough to notice.
+        if not near_seam and rep["n"] < deliberate_n:
+            # Short doubles away from a join are how people talk ("that that",
+            # "and and"). Say nothing about a single word; mention a pair.
             if rep["n"] >= 2:
                 notes.append(f"repeat at {rep['start']:.2f}s ({rep['text']!r}) is mid-range "
-                             f"with no join near it — said twice on purpose, left alone")
+                             f"and short — reads as speech, left alone")
             continue
+        # A LONG repeat is never deliberate. The first version of this function
+        # spared anything mid-range on the theory that a cut artefact always
+        # lands on a join, which is only true once a script has picked the takes.
+        # On a raw ramble both attempts sit inside one kept range, and the rule
+        # shipped "you don't have to be experienced with coding" twice in a row,
+        # eight words, into a finished render. Measured 2026-09-07 on a fresh
+        # clone cutting a 3:44 take with no script.
         if first[1] - first[0] < 0.05:
             continue
         drop.append(first)
