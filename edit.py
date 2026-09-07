@@ -20,6 +20,26 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+
+def _ensure_local_bin_on_path() -> None:
+    """Put the no-sudo tool dirs on PATH before anything shells out.
+
+    The ./edit wrapper does this, so running through the wrapper always worked and
+    hid the problem. Called any other way — Hermes, cron, launchd, ssh without a
+    login shell — PATH is /usr/bin:/bin:/usr/sbin:/sbin, and ffmpeg, ffprobe and
+    claude all live in ~/.local/bin. On the Mac Mini that meant a
+    FileNotFoundError on 'ffmpeg' halfway through a cut. The script should not
+    depend on how it was launched.
+    """
+    import os
+    extra = [str(Path.home() / ".local" / "bin"), "/opt/homebrew/bin", "/usr/local/bin"]
+    cur = os.environ.get("PATH", "").split(os.pathsep)
+    os.environ["PATH"] = os.pathsep.join(
+        [d for d in extra if d not in cur and Path(d).is_dir()] + cur)
+
+
+_ensure_local_bin_on_path()
+
 from src import assemble as assemble_mod  # noqa: E402
 from src import badtakes as badtakes_mod  # noqa: E402
 from src import captions as captions_mod  # noqa: E402
