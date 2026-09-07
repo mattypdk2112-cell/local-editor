@@ -211,6 +211,127 @@ def boundary_report(ranges: list[list[float]], words: list[dict],
                 continue
             gap = silence_before(t)
             if gap < min_silence:
-                issues.append({"kind": kind, "at": round(t, 2), "gap": round(gap, 2),
-                               "context": near(t)[:70]})
+                issues.append({"kind": kind, "index": i, "at": round(t, 2),
+                               "gap": round(gap, 2), "context": near(t)[:70]})
     return issues
+
+
+def snap_to_pause(ranges: list[list[float]], words: list[dict], *,
+                  min_silence: float = 0.20, max_shift: float = 1.20,
+                  restore_shift: float = 2.50
+                  ) -> tuple[list[list[float]], list[str]]:
+    """Move edges that `boundary_report` flags onto real silence. (ranges, notes).
+
+    Detecting a mid-speech cut and only printing a warning about it is not a fix.
+    Measured 2026-09-07: the take-selection pass correctly removed "All you have
+    to do" but its span ended one word short, the range then opened on the
+    orphaned "do", and the render said "To do, you don't have to use Terminal".
+    The tool printed "1 cut(s) land mid-speech" and encoded it anyway.
+
+    Both edges are moved INWARD — a start goes later, an end goes earlier — so
+    the repair always removes the fragment rather than restoring more of the take
+    around it. `max_shift` stops it eating a real line when a whole passage was
+    said without a breath.
+    """
+    if not ranges or not words:
+        return [list(r) for r in ranges], []
+
+    starts = sorted(w["start"] for w in words)
+    ends = sorted(w["end"] for w in words)
+
+    def pause_after(t: float) -> float | None:
+        """First word start at/after `t` that opens a run (real quiet before it)."""
+        for s in starts:
+            if s < t - 0.01:
+                continue
+            prev = [e for e in ends if e <= s + 0.01]
+            if not prev or s - prev[-1] >= min_silence:
+                return s
+        return None
+
+    def run_start_before(t: float) -> float | None:
+        """Start of the continuous run that `t` falls inside.
+
+        Not "the previous pause": the previous word END followed by silence can be
+        seconds away (7.85s on the take this was built for), while the run the
+        blade is sitting inside began 0.88s back. Restoring to the run start is
+        what gives the sentence back whole.
+        """
+        best = None
+        for s in starts:
+            if s > t + 0.01:
+                break
+            prev = [e for e in ends if e <= s + 0.01]
+            if not prev or s - prev[-1] >= min_silence:
+                best = s
+        return best
+
+    def pause_before(t: float) -> float | None:
+        """Last word end at/before `t` that closes a run (real quiet after it)."""
+        for e in reversed(ends):
+            if e > t + 0.01:
+                continue
+            nxt = [s for s in starts if s >= e - 0.01]
+            if not nxt or nxt[0] - e >= min_silence:
+                return e
+        return None
+
+    def run_end_after(t: float) -> float | None:
+        """End of the continuous run that `t` falls inside."""
+        for e in ends:
+            if e < t - 0.01:
+                continue
+            nxt = [s for s in starts if s >= e - 0.01]
+            if not nxt or nxt[0] - e >= min_silence:
+                return e
+        return None
+
+    out = [list(r) for r in ranges]
+    notes: list[str] = []
+    for iss in boundary_report(ranges, words, min_silence=min_silence):
+        i = iss.get("index")
+        if i is None:
+            continue
+        a, b = out[i]
+        if iss["kind"] == "start":
+            t = pause_after(a)
+            if t is not None and 0 < t - a <= max_shift and t < b - 0.20:
+                notes.append(f"snapped range {i} start {a:.2f} → {t:.2f} "
+                             f"(+{t - a:.2f}s) off mid-speech")
+                out[i][0] = round(t, 3)
+                continue
+            # No pause ahead within reach: the speaker ran the whole thing
+            # together, so there is no blade here at all and cutting into it can
+            # only leave a fragment. Give the words back instead. Measured
+            # 2026-09-07: "All you have to do you don't have to use terminal" is
+            # one continuous breath, the take-selection pass called the first half
+            # an abandoned false start, and the render said "To do, you don't have
+            # to use Terminal". Restored, it reads as the sentence he actually
+            # said. If restoring really does re-expose a duplicate take, the
+            # repeat check on the assembled audio removes it downstream.
+            t = run_start_before(a)
+            if t is not None and 0 < a - t <= restore_shift:
+                notes.append(f"no blade at range {i} start {a:.2f} — restored to "
+                             f"{t:.2f} (+{a - t:.2f}s) rather than leave a fragment")
+                out[i][0] = round(t, 3)
+        else:
+            t = pause_before(b)
+            if t is not None and 0 < b - t <= max_shift and t > a + 0.20:
+                notes.append(f"snapped range {i} end {b:.2f} → {t:.2f} "
+                             f"(-{b - t:.2f}s) off mid-speech")
+                out[i][1] = round(t, 3)
+                continue
+            t = run_end_after(b)
+            if t is not None and 0 < t - b <= restore_shift:
+                notes.append(f"no blade at range {i} end {b:.2f} — restored to "
+                             f"{t:.2f} (+{t - b:.2f}s) rather than leave a fragment")
+                out[i][1] = round(t, 3)
+    # Restoring can push a range into its neighbour; merge any overlap.
+    out.sort()
+    merged: list[list[float]] = []
+    for a, b in out:
+        if merged and a <= merged[-1][1] + 0.01:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return merged, notes

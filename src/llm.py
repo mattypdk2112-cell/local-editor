@@ -203,7 +203,28 @@ def _call_gemini(prompt: str, *, api_key: str, model: str,
             data.get("usageMetadata", {}) or {})
 
 
-def complete_json(backend: dict, prompt: str, *, timeout: float = 300.0,
+def complete_json_retry(backend: dict, prompt: str, *, tries: int = 2,
+                        **kw) -> tuple[dict, dict]:
+    """`complete_json`, but a timeout gets one more go before we give up.
+
+    The take-selection call is the difference between a 1:06 cut and a 1:43 one
+    full of retakes, and on 2026-09-07 it timed out once at 300s and the run
+    quietly continued with the worse cut. A single retry is cheap; silently
+    shipping the degraded edit is not.
+    """
+    last = None
+    for attempt in range(1, tries + 1):
+        try:
+            return complete_json(backend, prompt, **kw)
+        except RuntimeError as e:
+            last = e
+            if "did not answer within" not in str(e) or attempt == tries:
+                raise
+            print(f"  {e} — retrying ({attempt + 1}/{tries})")
+    raise last
+
+
+def complete_json(backend: dict, prompt: str, *, timeout: float = 600.0,
                   temperature: float = 0.4) -> tuple[dict, dict]:
     """Send a prompt, get back (parsed JSON, usage). Raises RuntimeError on failure."""
     name = backend["name"]
