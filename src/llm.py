@@ -32,7 +32,24 @@ DEFAULT_OR_MODEL = "anthropic/claude-sonnet-5"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 # Sonnet, not whatever the user's interactive session happens to be set to. This is
 # a text-reordering job; Opus would spend their plan limits for no better answer.
-DEFAULT_CLAUDE_MODEL = "sonnet"
+# Measured 2026-09-07 on a 433-word transcript of a 3:44 raw take, same prompt,
+# model the only variable, scored against the creator's own hand cut of the same
+# footage:
+#
+#   haiku    192.4s   93.9s removed    (not measured against the hand cut)
+#   sonnet   127.3s   99.6s removed    90.2% match, 233 words survive
+#   opus      77.7s  101.8s removed    91.7% match, 226 words survive
+#
+# Opus was faster AND cut tighter AND landed closer to the hand cut, which is the
+# opposite of the obvious guess. Haiku was the worst on both axes: slower than
+# either and it missed the big superseded blocks, catching only small stutters.
+#
+# One run each, and this call has ranged from roughly 78s to 10 minutes across a
+# session, so treat the timings as a direction rather than a benchmark. The match
+# percentages are stable — they come from the spans, not the clock.
+#
+# --llm-model overrides this per run.
+DEFAULT_CLAUDE_MODEL = "opus"
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
