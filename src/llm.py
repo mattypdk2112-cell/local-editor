@@ -85,8 +85,25 @@ def load_env_key(name: str, *, project_root) -> str | None:
 
 
 def claude_cli() -> str | None:
-    """Path to the Claude Code binary, or None if it isn't installed."""
-    return shutil.which("claude")
+    """Path to the Claude Code binary, or None if it isn't installed.
+
+    PATH alone is not enough. A non-interactive shell — cron, a launchd job, ssh
+    without a login shell — gets a bare PATH of /usr/bin:/bin:/usr/sbin:/sbin, and
+    Claude Code installs to ~/.local/bin. On the Mac Mini that runs this headless,
+    shutil.which returned None while the binary sat right there, and the editor
+    quietly fell back to a BILLED API key for every cut. Check the known install
+    locations too.
+    """
+    found = shutil.which("claude")
+    if found:
+        return found
+    for p in (Path.home() / ".local" / "bin" / "claude",
+              Path.home() / ".claude" / "local" / "claude",
+              Path("/opt/homebrew/bin/claude"),
+              Path("/usr/local/bin/claude")):
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p)
+    return None
 
 
 def resolve_backend(project_root, *, prefer_model: str | None = None) -> dict | None:
