@@ -12,10 +12,48 @@ from pathlib import Path
 # 8.1.2, node 22). Make sure that's on PATH for every subprocess we spawn.
 LOCAL_BIN = Path.home() / ".local" / "bin"
 
+# Fontconfig is BROKEN on this Mac: every ffmpeg call prints "Fontconfig error:
+# Cannot load default config file: No such file: (null)". Nothing fails loudly.
+# What happens instead is that libass cannot resolve ANY family name and silently
+# falls back to its built-in default (DejaVu Sans), so `subtitles=` renders every
+# caption in the wrong typeface while reporting success.
+#
+# Found 2026-09-13 the hard way: a reel shipped to Matt in DejaVu Bold when the
+# spec was Helvetica Neue Bold. He spotted it instantly ("it doesnt look like
+# helvetic looks liek montserrat") and it had almost certainly been wrong on
+# every captioned render before that too.
+#
+# So: write a minimal fontconfig that points at the real font directories, and
+# hand it to every subprocess. Cheap, idempotent, and it makes `find_font_file`
+# and libass agree on what a family name means.
+_FC_DIRS = ["/System/Library/Fonts", "/Library/Fonts", str(Path.home() / "Library" / "Fonts")]
+
+
+def _fontconfig_file() -> Path:
+    """Write (once) a minimal fonts.conf and return its path."""
+    base = Path.home() / ".cache" / "local-editor" / "fontconfig"
+    base.mkdir(parents=True, exist_ok=True)
+    conf = base / "fonts.conf"
+    want = (
+        '<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n<fontconfig>\n'
+        + "".join(f"  <dir>{d}</dir>\n" for d in _FC_DIRS)
+        + f"  <cachedir>{base / 'cache'}</cachedir>\n</fontconfig>\n"
+    )
+    if not conf.exists() or conf.read_text() != want:
+        conf.write_text(want)
+    (base / "cache").mkdir(exist_ok=True)
+    return conf
+
 
 def _env() -> dict:
     env = os.environ.copy()
     env["PATH"] = f"{LOCAL_BIN}:{env.get('PATH', '')}"
+    # Only set it if the user has not deliberately pointed somewhere else.
+    if not env.get("FONTCONFIG_FILE"):
+        try:
+            env["FONTCONFIG_FILE"] = str(_fontconfig_file())
+        except OSError:
+            pass  # unwritable cache dir is not a reason to fail the render
     return env
 
 

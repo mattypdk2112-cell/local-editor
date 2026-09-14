@@ -68,3 +68,34 @@ def plan(src_w: int, src_h: int, *, aspect: str | None = None,
         parts.append(f"scale={ow}:{oh}")
 
     return {"chain": ",".join(parts), "width": ow, "height": oh}
+
+
+# ---------------------------------------------------------------------------
+# Added 2026-09-13. A 4:3 crop at x=480 on a 3840-wide frame deleted the second
+# person in the shot, and every contact sheet taken afterwards was of the CROPPED
+# frame, so the error was invisible to every check that followed it. Matt had to
+# tell me his mate had been sitting in shot the whole take.
+#
+# The lesson is not "look harder". It is that a crop is destructive and silent,
+# so the tool should say out loud what it is throwing away BEFORE it does it.
+# ---------------------------------------------------------------------------
+
+def describe_discard(src_w: int, src_h: int, crop_w: int, crop_h: int,
+                     x: int, y: int) -> str:
+    """One line naming exactly what a crop removes, for printing before the cut.
+
+    Deliberately dumb: no detection, no model. It reports geometry, because the
+    failure was never that detection was wrong, it was that nothing was said.
+    """
+    left, right = x, src_w - (x + crop_w)
+    top, bottom = y, src_h - (y + crop_h)
+    pct = 100.0 * (1 - (crop_w * crop_h) / float(src_w * src_h))
+    parts = []
+    if left:   parts.append(f"{left}px off the LEFT")
+    if right:  parts.append(f"{right}px off the RIGHT")
+    if top:    parts.append(f"{top}px off the TOP")
+    if bottom: parts.append(f"{bottom}px off the BOTTOM")
+    if not parts:
+        return "crop: full frame kept"
+    return (f"crop discards {', '.join(parts)} ({pct:.0f}% of frame). "
+            f"CHECK THE SOURCE AT FULL WIDTH before trusting any frame taken after this.")
