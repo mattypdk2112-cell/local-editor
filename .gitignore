@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .DS_Store
 models/
+
+# never publish personal profiles here, this repo is public
+profiles/
