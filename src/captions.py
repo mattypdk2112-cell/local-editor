@@ -127,7 +127,7 @@ def build_ass(
     0.09em outline, a 0.03em shadow) are exactly size=10 / stroke=30 / shadow=30.
 
     `bg` (RRGGBB) switches on a CapCut-style highlight BOX behind the spoken word —
-    Andrew's style, and what Gemini reads off his own reels ("green box highlight
+    one client's style, read off their own reels ("green box highlight
     around captions", "white captions with green highlights for keywords"). ASS has
     no per-word box tag, so it's drawn as two layers: layer 0 renders the line with
     an opaque-box border whose colour is switched on per word (transparent on the
@@ -163,11 +163,11 @@ def build_ass(
     shadow = max(0, round(fontsize * 0.001 * max(0.0, shadow_pct)))
     # The box has to clear the stroke or it's invisible: a heavy outline (stroke 60 =
     # .18em) is wider than a fixed .12em pad, so the black stroke ate the highlight.
-    # Pad = stroke + a visible margin, which is the green frame you see on Andrew's reels.
+    # Pad = stroke + a visible margin, which is the green frame in that style.
     box_pad = outline + max(4, round(fontsize * 0.09))
     # Vertical placement, as a % of frame height from the bottom to the caption
     # baseline. 16 = the lower third we've always used; a client whose own reels sit
-    # mid-frame (Andrew's measure 46%) sets it per-org.
+    # mid-frame (one measured account sat at 46%) sets it per-org.
     margin_v = round(height * max(2.0, min(90.0, y_pct)) / 100.0)
     margin_h = round(width * 0.06)
     # Horizontal placement. ASS has no free x, only an alignment corner plus margins,

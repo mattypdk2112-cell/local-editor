@@ -235,7 +235,7 @@ def tighten(ranges: list[list[float]], runs: list[tuple[float, float]], *,
 
     `words` (whisper's word times) is a second opinion used ONLY to finish a word the
     measured edge cuts through: a final consonant carries so little energy that the
-    run can stop mid-articulation, and on Andrew's card video the blade landed 0.04s
+    run can stop mid-articulation, and on one test video the blade landed 0.04s
     inside "market" and shipped "TCG mar-". Whisper's times drift, which is why the
     audio is measured in the first place, so the reach is capped at `word_grace` and
     can never cross into the neighbouring measured run.
@@ -305,7 +305,7 @@ def tighten(ranges: list[list[float]], runs: list[tuple[float, float]], *,
         # audio: a forward bridge that finishes a word runs past the next range's
         # start, while that range's own head snap pulls back before this end. Rendered,
         # the shared slice plays TWICE — a stutter mid-sentence, which is what shipped
-        # on Andrew's card video ([133.68, 135.22] then [133.68, 136.92]). Neighbours
+        # on one test video ([133.68, 135.22] then [133.68, 136.92]). Neighbours
         # that overlap in source order are continuous speech by construction, so they
         # become one range. A deliberately REORDERED cut (the Drafter's) lands before
         # the previous range's start and is left alone: there the overlap is a seam
