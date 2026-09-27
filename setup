@@ -31,9 +31,21 @@ elif [ "$OS" = mac ]; then
     brew install ffmpeg
     ok "installed with Homebrew"
   else
-    die "ffmpeg is missing and Homebrew isn't installed.
-  Install Homebrew from https://brew.sh then run ./setup again,
-  or install ffmpeg yourself and re-run."
+    # No Homebrew. Installing it needs an admin password, which stalls anyone
+    # running this through Claude Code, so fetch a signed static build instead.
+    case "$(uname -m)" in arm64) ARCH=arm64 ;; *) ARCH=amd64 ;; esac
+    mkdir -p "$HOME/.local/bin"
+    TMP="$(mktemp -d)"
+    for tool in ffmpeg ffprobe; do
+      curl -fsSL -o "$TMP/$tool.zip" \
+        "https://ffmpeg.martin-riedl.de/redirect/latest/macos/$ARCH/release/$tool.zip" \
+        || die "couldn't download $tool. Check your internet, or install Homebrew from https://brew.sh and re-run."
+      unzip -o -q "$TMP/$tool.zip" -d "$TMP"
+      mv "$TMP/$tool" "$HOME/.local/bin/$tool"
+      chmod +x "$HOME/.local/bin/$tool"
+    done
+    rm -rf "$TMP"
+    ok "installed to ~/.local/bin (no Homebrew needed)"
   fi
 else
   if command -v apt-get >/dev/null 2>&1; then
@@ -97,7 +109,9 @@ cat <<EOF
   It lands in ~/Downloads and opens by itself.
 EOF
 
-if ! command -v claude >/dev/null 2>&1; then
+# The desktop app keeps its own copy of Claude Code, off PATH. The editor finds it.
+if ! command -v claude >/dev/null 2>&1 \
+   && ! ls "$HOME/Library/Application Support/Claude/claude-code/"*/claude.app >/dev/null 2>&1; then
   cat <<EOF
 
   Note: --bad-takes and --draft need a model to think with, and they use the

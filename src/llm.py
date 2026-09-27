@@ -103,6 +103,16 @@ def claude_cli() -> str | None:
               Path("/usr/local/bin/claude")):
         if p.is_file() and os.access(p, os.X_OK):
             return str(p)
+    # Someone who only installed the Claude desktop app has no `claude` on any
+    # PATH; the CLI lives inside the app, one folder per version. Take the newest.
+    bundled = Path.home() / "Library" / "Application Support" / "Claude" / "claude-code"
+    versions = sorted(bundled.glob("*/claude.app/Contents/MacOS/claude"),
+                      key=lambda b: [int(x) if x.isdigit() else 0
+                                     for x in b.parents[3].name.split(".")],
+                      reverse=True)
+    for p in versions:
+        if os.access(p, os.X_OK):
+            return str(p)
     return None
 
 

@@ -279,7 +279,9 @@ def main() -> int:
         if script_path.exists():
             script_lines = scriptmatch_mod.load_script(script_path)
         else:
-            print(f"  script not found: {script_path} — ignoring.")
+            # Ignoring it would quietly ship a normal cut that looks like a script cut.
+            print(f"error: script not found: {script_path}", file=sys.stderr)
+            return 1
 
     # 1 — transcribe (cache per project so the iterate loop doesn't re-run whisper)
     print("\n[1/4] transcribe")

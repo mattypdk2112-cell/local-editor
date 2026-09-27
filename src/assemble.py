@@ -75,6 +75,10 @@ def _filtergraph(
         src = "[acat]anull"
     if normalize:
         src += ",loudnorm=I=-14:TP=-1.5:LRA=11"
+    # Pin the audio to the picture. loudnorm runs at 192kHz and hands back a few extra
+    # samples, so renders came out with audio ~0.06-0.09s longer than the video.
+    # Resample back, pad, and let -shortest stop the audio where the picture stops.
+    src += ",aresample=48000,apad"
     lines.append(src + "[aout]")
 
     return "\n".join(lines) + "\n"
@@ -118,7 +122,7 @@ def assemble(
         *vcodec,
         "-pix_fmt", "yuv420p", "-profile:v", "high",
         "-c:a", "aac", "-b:a", "192k",
-        "-movflags", "+faststart",
+        "-movflags", "+faststart", "-shortest",
         str(out),
     ]
     # cwd = project so `subtitles=captions.ass` resolves without path escaping.
