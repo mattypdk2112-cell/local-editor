@@ -17,6 +17,7 @@ capHeight / (winAscent + winDescent) * 100 predicts 46.6.
 """
 from __future__ import annotations
 
+import os
 import struct
 from pathlib import Path
 
@@ -25,6 +26,9 @@ FONT_DIRS = [
     Path("/Library/Fonts"),
     Path("/System/Library/Fonts"),
     Path("/System/Library/Fonts/Supplemental"),
+    # Windows: system fonts, then per-user installs (what "Install for me" does)
+    Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts",
+    Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Microsoft" / "Windows" / "Fonts",
 ]
 
 

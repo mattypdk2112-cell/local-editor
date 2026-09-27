@@ -26,7 +26,11 @@ LOCAL_BIN = Path.home() / ".local" / "bin"
 # So: write a minimal fontconfig that points at the real font directories, and
 # hand it to every subprocess. Cheap, idempotent, and it makes `find_font_file`
 # and libass agree on what a family name means.
-_FC_DIRS = ["/System/Library/Fonts", "/Library/Fonts", str(Path.home() / "Library" / "Fonts")]
+if sys.platform == "win32":
+    _FC_DIRS = [os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts"),
+                str(Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Microsoft" / "Windows" / "Fonts")]
+else:
+    _FC_DIRS = ["/System/Library/Fonts", "/Library/Fonts", str(Path.home() / "Library" / "Fonts")]
 
 
 def _fontconfig_file() -> Path:
@@ -47,7 +51,7 @@ def _fontconfig_file() -> Path:
 
 def _env() -> dict:
     env = os.environ.copy()
-    env["PATH"] = f"{LOCAL_BIN}:{env.get('PATH', '')}"
+    env["PATH"] = f"{LOCAL_BIN}{os.pathsep}{env.get('PATH', '')}"
     # Only set it if the user has not deliberately pointed somewhere else.
     if not env.get("FONTCONFIG_FILE"):
         try:
@@ -72,6 +76,26 @@ def run(cmd: list[str], *, cwd: Path | None = None, quiet: bool = False) -> subp
         tail = "\n".join(proc.stderr.strip().splitlines()[-20:])
         raise RuntimeError(f"command failed ({proc.returncode}): {' '.join(map(str, cmd))}\n{tail}")
     return proc
+
+
+_FC_FLAG: str | None = None
+
+
+def filter_script_flag() -> str:
+    """The flag that reads a filtergraph from a file, for the installed ffmpeg.
+
+    ffmpeg 7 added `-/filter_complex <file>` and ffmpeg 9 removed the old
+    `-filter_complex_script`, which is what setup downloads as "latest". Found
+    2026-09-27 on a fresh Windows install: every cut planned fine, then the render
+    died with "Unrecognized option 'filter_complex_script'". Old apt builds (4.x)
+    only know the old form, so ask the binary instead of guessing.
+    """
+    global _FC_FLAG
+    if _FC_FLAG is None:
+        out = subprocess.run(["ffmpeg", "-version"], env=_env(), capture_output=True, text=True).stdout
+        m = re.search(r"ffmpeg version n?(\d+)\.", out)
+        _FC_FLAG = "-/filter_complex" if m and int(m.group(1)) >= 7 else "-filter_complex_script"
+    return _FC_FLAG
 
 
 def probe(video: Path) -> dict:

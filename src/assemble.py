@@ -10,7 +10,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from .util import run
+from .util import filter_script_flag, run
 
 
 def _filtergraph(
@@ -117,7 +117,7 @@ def assemble(
         ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
     )
     cmd += [
-        "-filter_complex_script", "filtergraph.txt",
+        filter_script_flag(), "filtergraph.txt",
         "-map", "[vout]", "-map", "[aout]",
         *vcodec,
         "-pix_fmt", "yuv420p", "-profile:v", "high",

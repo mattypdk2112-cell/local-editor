@@ -703,7 +703,7 @@ def main() -> int:
             (project / "proxy_fg.txt").write_text("\n".join(fg))
             out = project / "cut_proxy.wav"
             util_mod.run(["ffmpeg", "-y", "-v", "error", "-i", str(wav),
-                          "-filter_complex_script", str(project / "proxy_fg.txt"),
+                          util_mod.filter_script_flag(), str(project / "proxy_fg.txt"),
                           "-map", "[out]", "-ac", "1", "-ar", "16000",
                           "-c:a", "pcm_s16le", str(out)])
             return out
@@ -899,7 +899,11 @@ def main() -> int:
         print(f"   thinking: ~${total:.4f}")
 
     if not args.no_open:
-        subprocess.run(["open", str(result["exported_out"])])
+        if sys.platform == "win32":
+            import os
+            os.startfile(str(result["exported_out"]))
+        else:
+            subprocess.run(["open", str(result["exported_out"])])
     return 0
 
 

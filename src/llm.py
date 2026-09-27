@@ -98,6 +98,7 @@ def claude_cli() -> str | None:
     if found:
         return found
     for p in (Path.home() / ".local" / "bin" / "claude",
+              Path.home() / ".local" / "bin" / "claude.exe",
               Path.home() / ".claude" / "local" / "claude",
               Path("/opt/homebrew/bin/claude"),
               Path("/usr/local/bin/claude")):

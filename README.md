@@ -12,7 +12,9 @@ Made by [Matt Pham](https://instagram.com/mattphxm) at Converter Studios.
 
 ## Install
 
-You need a Mac or Linux. On Windows, use WSL.
+Works on Mac, Linux and Windows.
+
+**Mac / Linux:**
 
 ```bash
 git clone https://github.com/mattypdk2112-cell/local-editor.git ~/local-editor
@@ -23,6 +25,18 @@ cd ~/local-editor
 `./setup` installs ffmpeg if you don't have it (no Homebrew or password needed), builds an isolated Python environment,
 and downloads the speech model. It takes a couple of minutes and you only do it once.
 It is safe to run again if something looks wrong.
+
+**Windows:** in PowerShell or Command Prompt:
+
+```
+git clone https://github.com/mattypdk2112-cell/local-editor.git %USERPROFILE%\local-editor
+cd %USERPROFILE%\local-editor
+setup.cmd
+```
+
+Same four steps, no admin password. If Python is missing it installs it with winget. From
+then on every command below is `edit.cmd` instead of `./edit`, for example
+`edit.cmd "%USERPROFILE%\Desktop\raw.mp4" --script "%USERPROFILE%\Desktop\script.txt"`.
 
 If you'd rather not touch a terminal, open [Claude Code](https://claude.com/claude-code)
 and paste this:
@@ -127,13 +141,12 @@ new ones. That is enforced in code, not asked for in a prompt.
 - Hand you a Premiere or CapCut timeline. It exports a finished MP4 you can fine-tune from.
 - Tell you if the hook works. That is a data question, not an editing one.
 - Colour grade, add motion graphics, or anything past cuts and captions.
-- Run on Windows. Mac and Linux only.
 
 ## If it breaks
 
 Run `./setup` again first, it fixes most things.
 
-**"ffmpeg is not installed"**. Run `./setup` again, it downloads one into `~/.local/bin`.
+**"ffmpeg is not installed"**. Run `./setup` (Windows: `setup.cmd`) again, it downloads one into `~/.local/bin`.
 
 **"need Python 3.9 or newer"**. On a Mac, `xcode-select --install`.
 
