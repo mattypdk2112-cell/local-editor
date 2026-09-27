@@ -17,6 +17,7 @@ from __future__ import annotations
 import difflib
 import json
 import re
+from collections import Counter
 from pathlib import Path
 
 import httpx
@@ -128,9 +129,43 @@ def _best_window(script_line: str, words: list[dict]) -> tuple[float, tuple[int,
         for i in range(0, len(words) - wlen + 1):
             sp = [t for t in toks[i:i + wlen] if t]
             r = difflib.SequenceMatcher(None, st, sp).ratio()
-            if r > best_r:
+            # On a tie take the LATER take: you redo a line until it's right, so
+            # the last one is the keeper. First-wins put "Nah, I'm playing" on the
+            # abandoned 20s take of the Lyra ramble while the next line came from
+            # the 27s one, and the cut said it twice (2026-09-27).
+            if r > best_r or (r == best_r and best_span and i > best_span[0]):
                 best_r, best_span = r, (i, i + wlen - 1)
     return (best_r, best_span)
+
+
+def _extend_tail(script_line: str, words: list[dict], span: tuple[int, int],
+                 reach: int = 8) -> tuple[int, int]:
+    """Stretch a match forward when it stopped at a stumble mid-line.
+
+    "really show that there was more, | that there was more to engineering": the
+    best window ends at the stumble because taking in the restart costs more ratio
+    than the missing tail loses, so the cut says "there was more, than just being
+    behind a computer" (Lyra, 2026-09-27). If the script's missing last words are
+    said, in order, within `reach` words after the match, extend to them. The
+    stumble in between is the bad-take pass's job, and it can now remove it
+    without the line losing a word.
+    """
+    a, b = span
+    st = _tokens(script_line)
+    got = [badtakes._norm(w["word"]) for w in words[a:b + 1]]
+    # Script tokens after the last one the window actually matched.
+    last = -1
+    for blk in difflib.SequenceMatcher(None, st, got).get_matching_blocks():
+        if blk.size:
+            last = blk.a + blk.size - 1
+    tail = st[last + 1:]
+    if not tail:
+        return span
+    ahead = [badtakes._norm(w["word"]) for w in words[b + 1:b + 1 + reach + len(tail)]]
+    for i in range(len(ahead) - len(tail) + 1):
+        if ahead[i:i + len(tail)] == tail:
+            return (a, b + i + len(tail))
+    return span
 
 
 def align_script(transcript: dict, script_lines: list[str], *, api_key: str, model: str = DEFAULT_MODEL) -> dict:
@@ -176,6 +211,7 @@ def align_script_local(transcript: dict, script_lines: list[str]) -> dict:
     for i, line in enumerate(script_lines):
         r, span = _best_window(line, words)
         if span and r > 0:
+            span = _extend_tail(line, words, span)
             matches.append({"line": i, "from": span[0], "to": span[1], "note": f"local {r:.2f}"})
         else:
             matches.append({"line": i, "from": None, "to": None, "note": "no match"})
@@ -189,6 +225,46 @@ def _span_has_cta(words: list[dict], a: int, b: int, cta_terms: list[str]) -> bo
         if toks and any(norms[i:i + len(toks)] == toks for i in range(len(norms) - len(toks) + 1)):
             return True
     return False
+
+
+def _recall(script_line: str, words: list[dict]) -> int:
+    """How many of the script line's tokens the words still say (multiset)."""
+    have = Counter(_tokens(" ".join(w["word"] for w in words)))
+    return sum((Counter(_tokens(script_line)) & have).values())
+
+
+def spans_that_keep_script(spans: list[list[float]], words: list[dict],
+                           matches: list[dict], script_lines: list[str]
+                           ) -> tuple[list[list[float]], list[tuple[list[float], str]]]:
+    """Split bad-take spans into (safe, rejected) for a scripted cut.
+
+    A span is safe when every matched line it touches still says all the script
+    words it said before. That keeps the job the bad-take pass is there for: a
+    false start inside a beat ("What happens when you ask a person | What happens
+    when you ask a person...") only removes a duplicate, so the line survives.
+
+    Found 2026-09-27 on the Lyra poker take: the model flagged one 61s span
+    (29-90s, 185 words) as "repeated abandoned attempts", and subtracting it wiped
+    three beats the script matcher had just matched, 36/36. The script is what the
+    user asked for, so a span that deletes script words loses, not the script.
+    """
+    safe, rejected = [], []
+    for sp in spans:
+        a, b = sp
+        hit = None
+        for m in matches:
+            if m.get("from") is None or m.get("to") is None:
+                continue
+            line = script_lines[m["line"]]
+            seg = words[m["from"]:m["to"] + 1]
+            if not seg or seg[-1]["end"] <= a or seg[0]["start"] >= b:
+                continue
+            kept = [w for w in seg if w["end"] <= a or w["start"] >= b]
+            if _recall(line, kept) < _recall(line, seg):
+                hit = line
+                break
+        (rejected.append((sp, hit)) if hit else safe.append(sp))
+    return safe, rejected
 
 
 def build_script_cut(

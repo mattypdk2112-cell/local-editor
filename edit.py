@@ -383,6 +383,7 @@ def main() -> int:
 
     # 1.5a — script-aware cutting (preferred when a script is given)
     cut = None
+    script_matches: list[dict] = []
     if script_lines and not args.no_cut:
         try:
             # Deterministic string-matching is the DEFAULT — reproducible, no cost,
@@ -419,6 +420,7 @@ def main() -> int:
                 print(f"  low coverage ({sc['coverage']}) — falling back to bad-takes/plain.")
             else:
                 cut = sc
+                script_matches = al["matches"]
         except Exception as e:  # any align/parse failure → fall back, never crash a run
             print(f"  script align failed ({e}) — falling back.")
 
@@ -507,6 +509,12 @@ def main() -> int:
     # ranges works on every path; tighten (next) then snaps the new edges to real
     # speech, which also repairs whisper's sloppy span boundaries.
     scripted_drop = [sp for sp in (bad_spans or []) if sp not in retake_spans] if cut_was_scripted else []
+    if scripted_drop:
+        # The script wins: never let a flagged span delete words a script line needs.
+        scripted_drop, vetoed = scriptmatch_mod.spans_that_keep_script(
+            scripted_drop, transcript["words"], script_matches, script_lines)
+        for (a, b), line in vetoed:
+            print(f"  kept {a:.2f}-{b:.2f}s, a bad-take span that would delete script words: \"{line[:60]}\"")
     if scripted_drop:
         retake_spans = retake_spans + scripted_drop
     if retake_spans:
