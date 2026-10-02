@@ -41,6 +41,19 @@ cd ~/local-editor
 The finished file lands in `~/Downloads` and opens by itself. The first run is slower
 because it downloads the speech model once.
 
+## Build a whole reel from several clips
+
+`./edit` cuts one clip. `./reel` joins several (talking clips, screen recordings, b-roll) and adds
+text with simple animations, your own sound effects and music, an end card and captions, all from
+one small recipe file:
+
+```bash
+./reel recipes/example.json all
+```
+
+Everything is in [recipes/README.md](recipes/README.md). No music or sound effects are included,
+bring your own.
+
 ## The two jobs it does
 
 **1. You have a script.** You filmed it, stumbled, did five takes of the hook, and now you

@@ -1,0 +1,30 @@
+{
+  "name": "example",
+  "out": "~/Downloads/reels",
+  "footage_dir": "~/Movies/my-shoot",
+  "size": [1080, 1920],
+  "fps": 30,
+  "squeeze": true,
+
+  "pieces": [
+    {"label": "hook",  "file": "talk.mov",   "in": 2.4,  "out": 6.1},
+    {"label": "demo",  "file": "screen.mov", "in": 0.0,  "out": 5.0, "kind": "broll"},
+    {"label": "point", "file": "talk.mov",   "in": 14.0, "out": 21.5, "tail": 0.3},
+    {"label": "cta",   "file": "talk.mov",   "in": 40.2, "out": 44.0}
+  ],
+
+  "stamp_style": {"size_pct": 3.5, "y_pct": 12, "anim": "slide"},
+  "stamps": [
+    {"at": "demo", "text": "this is the whole thing", "until": "demo.end"},
+    {"at": "cta",  "text": "comment EDIT", "anim": "pop"}
+  ],
+
+  "sfx": [
+    {"sound": "~/Music/sfx/whoosh.wav", "at": "cuts", "peak_db": -26}
+  ],
+
+  "music": {"file": "~/Music/song.mp3", "gain_db": -18, "land": {"song_at": 32.0, "on": "demo"}},
+
+  "end_card": {"text": "follow for part 2", "secs": 1.5, "anim": "pop"},
+  "captions": true
+}

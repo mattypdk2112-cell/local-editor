@@ -32,3 +32,9 @@ at load 32 on 8 cores from a parallel Remotion render, so there is also no hones
 2. Only after both pass: write the friend a short how-to message (install prompt for Claude Code,
    the two commands, how to ask Claude to fix a cut by editing script.txt / story.txt).
 3. Unknown: is the friend on Mac or Windows? Windows is unsupported (WSL only). Ask Matt.
+
+## 2026-10-02 (night), Recipe engine ported in (public, simplified)
+- Matt said yes to upgrading the public editor, with limits: no music or SFX library, simple animations only.
+- Added `./reel` + `reel.py` + `src/sequence.py` (ported from the private video-editor, stripped): pieces, squeeze, anchors, text stamps with fade/slide/pop/none, user-supplied SFX and music (land a song moment on a cut), end card, captions via ./edit. Removed: profiles, LUT grades, speed/rubberband, audio swap, music library, word-mode squeeze. `util.proxy_for` ported. `recipes/example.json` + `recipes/README.md`, README section added.
+- Tested as a stranger: clean copy, fresh ./setup (3m17s), full build from synthetic clips with squeeze, a word anchor, slide/pop/fade text, SFX on every cut, music landed on a cut, end card and captions. Picture and audio 12.03s each. Bug found and fixed: the last caption spilled onto the end card, so captions now run on the body and the card is joined after.
+- **Open loops / next step:** none for the engine. Real-footage use will show what to tune.

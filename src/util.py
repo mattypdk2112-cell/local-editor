@@ -373,3 +373,34 @@ def snap_to_pause(ranges: list[list[float]], words: list[dict], *,
         else:
             merged.append([a, b])
     return merged, notes
+
+
+def proxy_for(src: Path, W: int, H: int) -> Path:
+    """One cached, smaller copy of a big source file, so ./reel never decodes 4K per cut.
+    Scaled to just cover W x H (never upscaled later), H.264 with a
+    keyframe every 12 frames so seeks are cheap, audio copied untouched so cut points and
+    levels match the camera file. Lives in <source dir>/.proxies/, named with the source's
+    byte size + mtime, so a replaced or re-graded source gets a fresh one automatically.
+    Returns src unchanged when it is already near W x H."""
+    info = probe(src)
+    sw, sh = info.get("width") or 0, info.get("height") or 0
+    if not sw or not sh:
+        return src
+    f = max(W / sw, H / sh)
+    if f > 0.75:
+        return src
+    pw, ph = int(round(sw * f / 2)) * 2, int(round(sh * f / 2)) * 2
+    st = src.stat()
+    pdir = src.parent / ".proxies"
+    pdir.mkdir(exist_ok=True)
+    px = pdir / f"{src.stem}_{pw}x{ph}_{st.st_size}_{int(st.st_mtime)}.mov"
+    if px.exists() and px.stat().st_size > 0:
+        print(f"  proxy: reusing {px.name}")
+        return px
+    tmp = px.with_name(px.stem + ".part.mov")
+    print(f"  proxy: {src.name} {sw}x{sh} -> {pw}x{ph} (built once, cached in {pdir})")
+    run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src), "-map", "0:v:0", "-map", "0:a:0?",
+         "-vf", f"scale={pw}:{ph}:flags=lanczos", "-c:v", "libx264", "-crf", "16", "-preset", "veryfast",
+         "-g", "12", "-pix_fmt", "yuv420p", "-c:a", "copy", str(tmp)])
+    tmp.rename(px)
+    return px
