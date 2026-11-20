@@ -339,3 +339,23 @@ def _subtract(ranges: list[list[float]], spans: list[list[float]]) -> list[list[
                 nxt.append([max(sb, a), b])
         out = nxt
     return [[round(a, 3), round(b, 3)] for a, b in out if b - a > 0]
+
+
+def repeated_lines(segments: list[dict], *, min_words: int = 3, sim: float = 0.8) -> list[dict]:
+    """Every line said again later in the clip, except its last take: [{start, end, text}] to cut.
+
+    No time window: a retake said 15 s after the first try is still a retake. Lines are
+    whisper segments; near-identical = 80% of the normalised text matches, both 3+ words.
+    """
+    from difflib import SequenceMatcher
+    norm = [" ".join(_norm(w) for w in s.get("text", "").split() if _norm(w)) for s in segments]
+    out = []
+    for i, a in enumerate(norm):
+        if len(a.split()) < min_words:
+            continue
+        for b in norm[i + 1:]:
+            if len(b.split()) >= min_words and SequenceMatcher(None, a, b).ratio() >= sim:
+                s = segments[i]
+                out.append({"start": float(s["start"]), "end": float(s["end"]), "text": s.get("text", "").strip()})
+                break
+    return out

@@ -10,13 +10,14 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from .util import run
+from .util import hlg_filter, run
 
 
 def _filtergraph(
     ranges: list[list[float]], has_music: bool, has_captions: bool,
     pre_gaps: list[float] | None = None, normalize: bool = True,
     geom: str = "",
+    tone: str = "",
 ) -> str:
     # Short audio fade at each segment edge so the concat seams don't click
     # (a hard splice on a non-zero waveform pops) and the small word-release the
@@ -38,6 +39,9 @@ def _filtergraph(
         # pad silence, so the speaker settles for a beat before the payoff cuts in.
         hold = pre_gaps[i + 1] if i + 1 < len(ranges) else 0.0
         vline = f"[0:v]trim=start={s}:end={e},setpts=PTS-STARTPTS"
+        if tone:
+            # HLG (phone HDR) -> Rec.709 and relabel the frames, or the cut renders grey.
+            vline += "," + tone.rstrip(",")
         if hold > 0:
             vline += f",tpad=stop_mode=clone:stop_duration={hold:.3f}"
         lines.append(vline + f"[v{i}];")
@@ -100,7 +104,7 @@ def assemble(
     graph_file = project / "filtergraph.txt"
     graph_file.write_text(
         _filtergraph(ranges, music is not None, captions is not None, pre_gaps, normalize,
-                     geom=geom)
+                     geom=geom, tone=hlg_filter(video))
     )
 
     out = project / "output.mp4"

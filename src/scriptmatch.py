@@ -33,7 +33,7 @@ from .roughcut import (
 )
 
 GEMINI_BASE = "https://generativelanguage.googleapis.com"
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-flash-latest"
 
 PROMPT = """You are aligning raw talking-head footage to the script the creator meant to say.
 

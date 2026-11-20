@@ -75,7 +75,9 @@ def run(cmd: list[str], *, cwd: Path | None = None, quiet: bool = False) -> subp
 
 
 def probe(video: Path) -> dict:
-    """Return {duration, width, height, has_audio, fps} for a video file."""
+    """Return {duration, width, height, has_audio, fps, codec} for a video file.
+    Width and height are as displayed: a phone clip stored landscape with a 90 degree
+    rotation tag reports its portrait size."""
     proc = run(
         [
             "ffprobe", "-v", "error",
@@ -99,13 +101,32 @@ def probe(video: Path) -> dict:
         except (ValueError, ZeroDivisionError):
             return 30.0
 
+    w, h = int(v["width"]), int(v["height"])
+    if _rotation(v) in (90, 270):
+        w, h = h, w
     return {
         "duration": float(data["format"]["duration"]),
-        "width": int(v["width"]),
-        "height": int(v["height"]),
+        "width": w,
+        "height": h,
         "has_audio": a is not None,
         "fps": round(_fps(v), 3),
+        "codec": v.get("codec_name", ""),
     }
+
+
+def _rotation(stream: dict) -> int:
+    """Display rotation in degrees (0, 90, 180, 270) from side data or the old rotate tag."""
+    raw = None
+    for sd in stream.get("side_data_list") or []:
+        if "rotation" in sd:
+            raw = sd["rotation"]
+            break
+    if raw is None:
+        raw = (stream.get("tags") or {}).get("rotate")
+    try:
+        return int(round(float(raw))) % 360 if raw is not None else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def detect_silence(wav: Path, *, noise_db: float = -32.0, min_dur: float = 0.05) -> tuple[list[float], list[float]]:
@@ -401,6 +422,50 @@ def proxy_for(src: Path, W: int, H: int) -> Path:
     print(f"  proxy: {src.name} {sw}x{sh} -> {pw}x{ph} (built once, cached in {pdir})")
     run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src), "-map", "0:v:0", "-map", "0:a:0?",
          "-vf", f"scale={pw}:{ph}:flags=lanczos", "-c:v", "libx264", "-crf", "16", "-preset", "veryfast",
-         "-g", "12", "-pix_fmt", "yuv420p", "-c:a", "copy", str(tmp)])
+         "-g", "12", "-pix_fmt", "yuv420p", "-c:a", "copy",
+         "-map_metadata", "0", "-movflags", "use_metadata_tags", str(tmp)])
     tmp.rename(px)
     return px
+
+
+# HLG (the HDR mode phones film in) -> Rec.709. Without it HLG footage renders grey and
+# washed out once it is encoded as ordinary H.264. Needs ffmpeg built with zscale.
+IPHONE_TONEMAP = ("zscale=tin=arib-std-b67:min=bt2020nc:pin=bt2020:rin=tv:t=linear:npl=100,format=gbrpf32le,"
+                  "zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p")
+REC709_TAGS = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
+
+_ZSCALE: bool | None = None
+
+
+def has_zscale() -> bool:
+    """True when this ffmpeg has the zscale filter the HLG tone-map needs."""
+    global _ZSCALE
+    if _ZSCALE is None:
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True, text=True)
+        _ZSCALE = " zscale " in r.stdout
+    return _ZSCALE
+
+
+def camera(video: Path) -> dict:
+    """{'iphone': bool, 'hlg': bool, 'model': str} from the file's own tags (Apple make/model, transfer)."""
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format_tags:stream=color_transfer",
+                        "-of", "json", str(video)], capture_output=True, text=True)
+    try:
+        j = json.loads(r.stdout or "{}")
+    except ValueError:
+        j = {}
+    tags = {k.lower(): v for k, v in (j.get("format", {}).get("tags") or {}).items()}
+    make = tags.get("com.apple.quicktime.make", "") + " " + tags.get("make", "")
+    model = tags.get("com.apple.quicktime.model", "") or tags.get("model", "")
+    trc = {s.get("color_transfer", "") for s in j.get("streams", [])}
+    return {"iphone": "apple" in make.lower() or "iphone" in model.lower(), "hlg": "arib-std-b67" in trc, "model": model}
+
+
+def hlg_filter(video: Path) -> str:
+    """Filter chain (with trailing comma) that tone-maps HLG footage to Rec.709, or "" when not needed."""
+    if not camera(video)["hlg"]:
+        return ""
+    if not has_zscale():
+        print("  HLG footage, but this ffmpeg has no zscale filter: colours may look washed out")
+        return ""
+    return f"{IPHONE_TONEMAP},{REC709_TAGS},"

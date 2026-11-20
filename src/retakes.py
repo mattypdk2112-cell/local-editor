@@ -95,9 +95,9 @@ def redecode(wav: Path, windows: list[tuple[float, float]], *,
     import subprocess
     import tempfile
 
-    from faster_whisper import WhisperModel
+    from .transcribe import get_model
 
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    model = get_model(model_size)
     terms = [t.strip() for t in (vocab or []) if t and t.strip()]
     prompt = ("Glossary: " + ", ".join(terms) + ".") if terms else None
 

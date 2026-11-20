@@ -29,7 +29,7 @@ OPENROUTER_KEYS = ("OPENROUTER_API_KEY", "OPEN_ROUTER", "OPENROUTER_KEY", "OPENR
 GEMINI_KEYS = ("GEMINI_API_KEY", "GEMINI_KEY")
 
 DEFAULT_OR_MODEL = "anthropic/claude-sonnet-5"
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
 # Sonnet, not whatever the user's interactive session happens to be set to. This is
 # a text-reordering job; Opus would spend their plan limits for no better answer.
 # Measured 2026-09-07 on a 433-word transcript of a 3:44 raw take, same prompt,
@@ -254,7 +254,12 @@ def _call_claude_cli(prompt: str, *, model: str, timeout: float) -> tuple[dict, 
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"claude code did not answer within {int(timeout)}s") from None
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()[:200]
+        detail = (proc.stderr or "").strip()
+        try:   # the CLI reports most failures inside its JSON, not on stderr
+            detail = detail or str(json.loads(proc.stdout).get("result") or "")
+        except (ValueError, AttributeError):
+            pass
+        detail = (detail or proc.stdout or "").strip()[:200]
         raise RuntimeError(f"claude code exited {proc.returncode}: {detail}")
 
     try:

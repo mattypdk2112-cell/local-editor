@@ -54,7 +54,7 @@ from src import titlecard as titlecard_mod  # noqa: E402
 from src import transcribe as transcribe_mod  # noqa: E402
 from src import geometry as geometry_mod  # noqa: E402
 from src import util as util_mod  # noqa: E402
-from src.util import (merge_overlaps, close_intraword_gaps, boundary_report, detect_silence, dump_json, fmt_secs, load_json,  # noqa: E402
+from src.util import (proxy_for, merge_overlaps, close_intraword_gaps, boundary_report, detect_silence, dump_json, fmt_secs, load_json,  # noqa: E402
                       next_versioned_path, probe)
 
 ROOT = Path(__file__).resolve().parent
@@ -84,6 +84,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-repair", action="store_true",
                    help="report what --verify finds but do not re-cut to remove it")
     p.add_argument("--max-gap", type=float, default=0.2, help="cut silences longer than this (s)")
+    p.add_argument("--drop", nargs="*", default=[], metavar="START-END",
+                   help="source time ranges to cut out, e.g. --drop 37.38-38.38. For a stumble\n"
+                        "that sits INSIDE a kept take, which neither --bad-takes nor --retakes\n"
+                        "catches. Times are in the SOURCE clip, from transcript.json")
+    p.add_argument("--proxy", action=argparse.BooleanOptionalAction, default=None,
+                   help="work from a cached 1080p H.264 proxy instead of the original.\n"
+                        "DEFAULT: on automatically for a 1440p-or-larger source, or HEVC,\n"
+                        "ProRes, AV1 or VP9, which decode slowly. --no-proxy forces the original")
+    p.add_argument("--pin", type=float, default=None, metavar="SECS",
+                   help="a SOURCE timestamp the edit is built around (a reaction, a reveal).\n"
+                        "It is protected from trimming and the run reports where it landed")
+    p.add_argument("--noise-db", type=float, default=speech_mod.NOISE_DB,
+                   help=f"silence floor in dBFS for measuring speech (default {speech_mod.NOISE_DB:g})")
     p.add_argument("--words-per-line", type=int, default=3, help="caption words shown per line")
     p.add_argument("--accent", default="FFFFFF", help="caption spoken-word/highlight colour (RRGGBB hex, default white)")
     p.add_argument("--caption-color", default="FFFFFF", help="caption base text colour (RRGGBB hex)")
@@ -134,7 +147,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--brief", default=None,
                    help="the creator's direction for THIS cut, fed to the Drafter "
                         "(e.g. --brief 'keep the dad story, punchier open')")
-    p.add_argument("--script-model", default="gemini-2.5-flash", help="model for script alignment")
+    p.add_argument("--script-model", default="gemini-flash-latest", help="model for script alignment")
     p.add_argument("--cta", nargs="*", default=[],
                    help="CTA keyword/phrase to NEVER cut, e.g. --cta 'comment gap'")
     p.add_argument("--protect-hook", action=argparse.BooleanOptionalAction, default=True,
@@ -151,11 +164,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--title-benefit", default=None,
                    help="benefit line under the title, e.g. --title-benefit 'completely free'")
     p.add_argument("--title-variant", default="badge",
-                   choices=["badge", "headline", "problem"],
-                   help="card treatment. badge = pill naming the product (default);\n                        headline = two stacked lines, product drops to a credit row;\n                        problem = line 1 is the pain and gets struck, then the fix lands")
+                   choices=["badge", "headline", "problem", "plate", "native"],
+                   help="card treatment. badge = pill naming the product (default);\n                        headline = two stacked lines, product drops to a credit row;\n                        problem = line 1 is the pain and gets struck, then the fix lands;\n                        plate = black text on a white plate, line 2 white on black;\n                        native = plain white text with a soft shadow, no box")
     p.add_argument("--title-credit", default=None,
                    help="small product line under a headline/problem card "
-                        "(default: the --title text)")
+                        "(default: none)")
     p.add_argument("--title-y", type=float, default=11.2,
                    help="title block top, %% of frame height. Sits relative to the SHOT:\n                        the card should tuck just above whatever the subject is at "
                         "(a laptop lid, a monitor), so a tighter frame wants a lower number")
@@ -214,7 +227,16 @@ def _apply_profile(args: argparse.Namespace, argv: list[str]) -> argparse.Namesp
     if not path.exists():
         sys.exit(f"edit: no such profile '{args.profile}' (looked in profiles/)")
 
-    explicit = {a.lstrip("-").replace("-", "_") for a in argv if a.startswith("--")}
+    # A --no-X flag has argparse dest "x", not "no_x", so register both forms, or the
+    # profile silently wins over an explicit --no-cut / --no-tighten / --no-captions.
+    explicit = set()
+    for a in argv:
+        if not a.startswith("--"):
+            continue
+        name = a.lstrip("-").split("=", 1)[0].replace("-", "_")
+        explicit.add(name)
+        if name.startswith("no_"):
+            explicit.add(name[3:])
     data = json.loads(path.read_text())
 
     # Accumulating options MERGE; scalars are overridden. Replacing was wrong and
@@ -227,6 +249,8 @@ def _apply_profile(args: argparse.Namespace, argv: list[str]) -> argparse.Namesp
     applied, merged = [], []
     for key, value in data.items():
         if key.startswith("_") or not hasattr(args, key):
+            continue
+        if isinstance(value, dict):   # a sub-config read elsewhere, never a flag value
             continue
         if key in explicit:
             if key in MERGE and isinstance(value, list):
@@ -245,10 +269,44 @@ def _apply_profile(args: argparse.Namespace, argv: list[str]) -> argparse.Namesp
     return args
 
 
+def _apply_drop(cut: dict, specs: list[str]) -> None:
+    """--drop windows, applied to cut['ranges'] in place (normal cut and --no-cut alike)."""
+    if not specs:
+        return
+    wins = []
+    for spec in specs:
+        try:
+            lo, hi = (float(x) for x in spec.split("-", 1))
+        except ValueError:
+            sys.exit(f"edit: --drop {spec!r} must look like 37.38-38.38")
+        wins.append((min(lo, hi), max(lo, hi)))
+    out: list[list[float]] = []
+    for a, b in cut["ranges"]:
+        segs = [[a, b]]
+        for lo, hi in wins:
+            nxt = []
+            for x, y in segs:
+                if hi <= x or lo >= y:
+                    nxt.append([x, y])
+                    continue
+                if x < lo:
+                    nxt.append([x, lo])
+                if hi < y:
+                    nxt.append([hi, y])
+            segs = nxt
+        out += [t for t in segs if t[1] - t[0] > 0.05]
+    held = cut["kept_duration"]
+    cut["ranges"] = out
+    cut["kept_duration"] = round(sum(b - a for a, b in out), 3)
+    cut["cuts"] = max(0, len(out) - 1)
+    print(f"  --drop removed {held - cut['kept_duration']:.2f}s ({len(specs)} window(s))")
+
+
 def main() -> int:
     args = _apply_profile(parse_args(), sys.argv[1:])
     _costs: list[float] = []  # per-run LLM spend (draft + align + bad-takes) for the cost meter
     video = args.input.expanduser().resolve()
+    original = video
     if not video.exists():
         print(f"error: input not found: {video}", file=sys.stderr)
         return 1
@@ -262,10 +320,27 @@ def main() -> int:
     print(f"\n▶ project: {project.relative_to(ROOT)}")
 
     info = probe(video)
-    print(f"  source: {info['width']}x{info['height']}  {fmt_secs(info['duration'])}  "
+    print(f"  source: {info['width']}x{info['height']} {info.get('codec') or '?'}  {fmt_secs(info['duration'])}  "
           f"{info['fps']}fps  audio={'yes' if info['has_audio'] else 'NO'}")
+    # Every stage decodes the whole clip from the top, and 1440p+ or HEVC/ProRes/AV1/VP9
+    # decode slowly on CPU. Cut from one cached 1080p H.264 proxy instead (built once,
+    # kept in <source dir>/.proxies/). Output is then 1080p; --no-proxy keeps full size.
+    heavy = info["height"] >= 1440 or info.get("codec") in ("hevc", "prores", "av1", "vp9")
+    use_proxy = heavy if args.proxy is None else args.proxy
+    if use_proxy and args.proxy is None and args.height and args.height > 1080:
+        use_proxy = False   # asked for more than a 1080p proxy can give
+    crop_x = args.crop_x
+    if use_proxy and min(info["width"], info["height"]) > 1080:
+        src_w = info["width"]
+        video = proxy_for(video, 1080, 1080)
+        info = probe(video)
+        if crop_x is not None:   # --crop-x is in ORIGINAL pixels
+            crop_x = round(crop_x * info["width"] / src_w)
+        print(f"  proxy: working from {info['width']}x{info['height']} (--no-proxy for the original)")
+    elif heavy and args.proxy is False:
+        print("  proxy: OFF by request, every stage decodes the original")
     geo = geometry_mod.plan(info["width"], info["height"], aspect=args.aspect,
-                            crop_x=args.crop_x, out_height=args.height)
+                            crop_x=crop_x, out_height=args.height)
     if geo["chain"]:
         print(f"  reframe: {geo['chain']}  ->  {geo['width']}x{geo['height']}")
     if not info["has_audio"]:
@@ -485,12 +560,23 @@ def main() -> int:
         else:
             print(f"  none ({len(rt['windows'])} window(s) checked)")
 
+    # 1.8 — a line said more than once keeps only its last take. The bad-take pass
+    # above can still have picked a better take; this only removes earlier repeats.
+    if cut is None and not args.no_cut and args.bad_takes:
+        reps = badtakes_mod.repeated_lines(transcript.get("segments", []))
+        if reps:
+            print(f"\n[1.8] repeated lines: cutting {len(reps)} earlier take(s), keeping the last")
+            for r in reps[:20]:
+                print(f"  ✂ {r['start']:.1f}-{r['end']:.1f} {r['text'][:70]}")
+            bad_spans = (bad_spans or []) + [[r["start"], r["end"]] for r in reps]
+
     # 2 — rough cut (unless script-aware cutting already produced a cut)
     print("\n[2/4] rough cut")
     if cut is None:
         if args.no_cut:
             cut = {"ranges": [[0.0, round(info["duration"], 3)]], "kept_words": transcript["words"],
                    "kept_duration": round(info["duration"], 3), "removed_duration": 0.0, "cuts": 0}
+            _apply_drop(cut, args.drop)
         else:
             cut = roughcut_mod.plan_cut(
                 transcript["words"], info["duration"],
@@ -509,6 +595,10 @@ def main() -> int:
     scripted_drop = [sp for sp in (bad_spans or []) if sp not in retake_spans] if cut_was_scripted else []
     if scripted_drop:
         retake_spans = retake_spans + scripted_drop
+    if args.pin is not None:
+        # Put the pinned moment back BEFORE the retake/tighten passes, which subtract by time.
+        cut["ranges"] = roughcut_mod.protect_window(cut["ranges"], args.pin)
+        cut["kept_duration"] = round(sum(b - a for a, b in cut["ranges"]), 3)
     if retake_spans:
         before = cut["kept_duration"]
         cut["ranges"] = speech_mod.subtract(cut["ranges"], retake_spans)
@@ -521,7 +611,7 @@ def main() -> int:
     # (0.6-0.9s per line on the reel this was built for) and restores the consonant
     # tails that were being clipped. Also drops any range holding no speech at all.
     if args.tighten and not args.no_cut and wav.exists():
-        runs = speech_mod.speech_runs(wav)
+        runs = speech_mod.speech_runs(wav, noise_db=args.noise_db)
         # `protect` = the retake spans just removed. Without it the forward reach
         # could bridge straight back into a bad take whose first words sit within
         # a breath of the previous range's end.
@@ -562,33 +652,44 @@ def main() -> int:
             print(f"  closed {njoin} cut(s) landing inside a word -> "
                   f"{cut['kept_duration']:.2f}s")
 
-            # tighten only moves EDGES. A pause sitting inside a kept range survives
-            # it — and survives plan_cut too on the script-aware path, which never
-            # calls plan_cut. Carve those out against the same measured runs, never
-            # cutting inside a word.
-            carved: list[list[float]] = []
-            for a, b in cut["ranges"]:
-                gaps = speech_mod.interior_gaps(a, b, runs, min_gap=args.max_gap + 0.14)
-                carved += speech_mod.carve(a, b, gaps) if gaps else [[a, b]]
-            if len(carved) > len(cut["ranges"]):
-                held = cut["kept_duration"]
-                cut["ranges"] = carved
-                cut["kept_duration"] = round(sum(b - a for a, b in carved), 3)
-                cut["cuts"] = max(0, len(carved) - 1)
-                print(f"  interior dead air carved: {held:.2f}s -> {cut['kept_duration']:.2f}s "
-                      f"({len(carved) - len(tight)} extra cut(s))")
+        # tighten only moves EDGES. A pause sitting inside a kept range survives
+        # it — and survives plan_cut too on the script-aware path, which never
+        # calls plan_cut. Carve those out against the same measured runs, never
+        # cutting inside a word.
+        # Carving uses the FIXED floor, not the adaptive one: on a noisy outdoor take the
+        # adaptive floor read the quiet middle of a word as a gap and carved inside it.
+        # On the fixed floor a noisy take simply carves nothing, the safe failure.
+        carve_runs = speech_mod.speech_runs(wav, noise_db=args.noise_db, adaptive=False)
+        carved: list[list[float]] = []
+        n_before = len(cut["ranges"])
+        for a, b in cut["ranges"]:
+            gaps = speech_mod.interior_gaps(a, b, carve_runs, min_gap=args.max_gap + 0.14)
+            carved += speech_mod.carve(a, b, gaps) if gaps else [[a, b]]
+        if len(carved) > len(cut["ranges"]):
+            held = cut["kept_duration"]
+            cut["ranges"] = carved
+            cut["kept_duration"] = round(sum(b - a for a, b in carved), 3)
+            cut["cuts"] = max(0, len(carved) - 1)
+            print(f"  interior dead air carved: {held:.2f}s -> {cut['kept_duration']:.2f}s "
+                  f"({len(carved) - n_before} extra cut(s))")
 
-            # A range holding only a stray "and" is a jerky double-cut on screen and
-            # reads as a stutter in the captions. plan_cut already drops these, but
-            # the script-aware path never calls it — so do it on the ranges.
-            kept, orphans = roughcut_mod.drop_orphan_ranges(cut["ranges"], transcript["words"])
-            if orphans:
-                cut["ranges"] = kept
-                cut["kept_duration"] = round(sum(b - a for a, b in kept), 3)
-                cut["cuts"] = max(0, len(kept) - 1)
-                for o in orphans:
-                    print(f"  dropped orphan range {o['range'][0]:.2f}-{o['range'][1]:.2f} "
-                          f"— only {' '.join(o['words'])!r}")
+        # A range holding only a stray "and" is a jerky double-cut on screen and
+        # reads as a stutter in the captions. plan_cut already drops these, but
+        # the script-aware path never calls it — so do it on the ranges.
+        kept, orphans = roughcut_mod.drop_orphan_ranges(cut["ranges"], transcript["words"])
+        if orphans:
+            cut["ranges"] = kept
+            cut["kept_duration"] = round(sum(b - a for a, b in kept), 3)
+            cut["cuts"] = max(0, len(kept) - 1)
+            for o in orphans:
+                print(f"  dropped orphan range {o['range'][0]:.2f}-{o['range'][1]:.2f} "
+                      f"— only {' '.join(o['words'])!r}")
+
+    # Explicit --drop windows: a stumble spoken straight through has no pause for the
+    # gap logic to find, so the only honest fix is to name the source seconds.
+    # (--no-cut applied them above.)
+    if not args.no_cut:
+        _apply_drop(cut, args.drop)
 
     dump_json(project / "cut.json", {k: v for k, v in cut.items() if k != "kept_words"})
     print(f"  {cut['cuts']} cut(s) · kept {fmt_secs(cut['kept_duration'])} · "
@@ -628,11 +729,18 @@ def main() -> int:
     #   legacy — caption from the source transcript through build_timemap.
     captions_path = None
     caption_from_cut = args.captions and args.caption_cut
+    # A title or CTA card with captions off used to be dropped without a word, because
+    # cards are burned on the cut-transcript path. Take that path and burn the card alone.
+    card_only = (not args.captions) and bool(args.title or args.cta_card)
+    if card_only:
+        caption_from_cut = True
     if args.captions and not caption_from_cut:
         print("\n[3/4] captions")
         captions_path = write_captions(cut["kept_words"], cut["ranges"],
                                        geo["width"], geo["height"])
         print(f"  wrote {captions_path.name}")
+    elif card_only:
+        print("\n[3/4] captions — off; title/CTA card only")
     elif caption_from_cut:
         print("\n[3/4] captions — deferred until the cut exists (--caption-cut)")
     else:
@@ -786,17 +894,22 @@ def main() -> int:
     if args.out_dir:
         out_dir = args.out_dir.expanduser().resolve()
     elif args.beside:
-        out_dir = video.parent
+        out_dir = original.parent
     else:
         out_dir = Path.home() / "Downloads"
     out_dir.mkdir(parents=True, exist_ok=True)
-    export_path = next_versioned_path(out_dir, video.stem)
+    export_path = next_versioned_path(out_dir, original.stem)
     # The trim/concat runs over the FULL source and is the slowest step here, so it
     # is skipped when output.mp4 already matches the plan. That is what makes the
     # preview -> approve -> render loop cheap: the second run only re-burns.
     existing = project / "output.mp4"
+    sig_path = project / "music.json"
+    music_sig = {"file": str(music) if music else None}
     reusable = (existing.exists() and not args.fresh
-                and abs(probe(existing)["duration"] - cut["kept_duration"]) < 0.25)
+                and abs((ex := probe(existing))["duration"] - cut["kept_duration"]) < 0.25
+                # A changed --aspect/--height or music must re-assemble, not reuse.
+                and (ex["width"], ex["height"]) == (geo["width"], geo["height"])
+                and (load_json(sig_path) if sig_path.exists() else None) == music_sig)
     if reusable:
         print(f"  reusing output.mp4 ({fmt_secs(cut['kept_duration'])}) — the cut is unchanged")
         result = {"project_out": existing, "exported_out": existing}
@@ -807,6 +920,7 @@ def main() -> int:
             pre_gaps=cut.get("pre_gaps"), normalize=not args.no_normalize,
             fast=args.fast, geom=geo["chain"],
         )
+        dump_json(sig_path, music_sig)
 
     if caption_from_cut:
         print("\n[3/4] captions — transcribing the cut")
@@ -851,7 +965,7 @@ def main() -> int:
         body = ([w for w in cut_tx["words"]
                  if (w["start"] + w["end"]) / 2 < cta_at]
                 if cta_at else cut_tx["words"])
-        captions_path = write_captions(body, [[0.0, cut_dur]],
+        captions_path = write_captions([] if card_only else body, [[0.0, cut_dur]],
                                        geo["width"], geo["height"])
 
         # Title + CTA card share this encode rather than adding another pass.
@@ -861,7 +975,11 @@ def main() -> int:
                 geo["width"], geo["height"], cut_dur,
                 title=args.title or "", benefit=args.title_benefit,
                 cta_keyword=args.cta_card, cta_line=args.cta_card_line,
-                cta_start=cta_at, title_out=args.title_secs,
+                # A --no-cut reel has one range and no seams, so cta_at is None and the
+                # CTA card never rendered. Fall back to the last 2.5s.
+                cta_start=(cta_at if (cta_at is not None or not args.cta_card)
+                           else max(0.0, cut_dur - 2.5)),
+                title_out=args.title_secs,
                 variant=args.title_variant, credit=args.title_credit,
                 title_y_pct=args.title_y, font=args.caption_font)
             (project / "title.ass").write_text(ass)
@@ -888,6 +1006,13 @@ def main() -> int:
         result = assemble_mod.burn(result["project_out"], captions_path,
                                    export_path=export_path, fast=args.fast, extra=extra)
         print(f"  burned {captions_path.name}")
+
+    if args.pin is not None:
+        landed = roughcut_mod.map_to_output(cut["ranges"], args.pin)
+        if landed is None:
+            print(f"  [!] pin {args.pin:.1f}s was trimmed away despite protection")
+        else:
+            print(f"  pin: source {args.pin:.1f}s landed at {landed:.1f}s in the cut")
 
     out_info = probe(result["project_out"])
     print(f"\n✅ done — {fmt_secs(out_info['duration'])} (from {fmt_secs(info['duration'])})")

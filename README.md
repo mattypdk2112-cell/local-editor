@@ -102,6 +102,11 @@ reuses the transcript, so fixing the cut is fast: change a line in `script.txt`,
 | `--music beat.mp3` | Lays a track underneath, mixed low so your voice sits on top |
 | `--height 1080` | Exports smaller than a 4K source. Faster, and plenty for a reel |
 | `--no-normalize` | Keeps your raw audio level, for when you finish the mix in Premiere or CapCut |
+| `--drop 37.4-38.4` | Cuts out a stretch of the source by hand (seconds, from `projects/<name>/transcript.json`). For a stumble the automatic passes missed. Takes several |
+| `--pin 12.5` | Protects a moment in the source (a reaction, a reveal) from trimming and tells you where it landed in the cut |
+| `--noise-db -38` | The silence floor for finding speech, in dBFS (decibels below full scale). Default -42. Raise it on a noisy room |
+| `--title "TEXT"` | A title card at the start. Works with captions on or off. `--title-variant` picks the look: badge, headline, problem, plate, native |
+| `--no-proxy` | Works from the original file even when it is 4K or HEVC (see Proxies below) |
 
 **Captions in your colours:** `--accent FF3D71` takes a plain hex with no hash,
 `--words-per-line 2` sets how many show at once, `--no-uppercase` keeps your casing.
@@ -112,6 +117,20 @@ transcript first, then burn. If it mishears something, `--fix 'heard=actual'` co
 it before it goes in.
 
 Run `./edit --help` for the rest. There are a lot of dials, you will not need most of them.
+
+## Proxies
+
+Every stage reads the whole clip from the top, and 1440p-or-larger footage, or HEVC,
+ProRes, AV1 and VP9 files (what iPhones and most cameras record), decode slowly. For
+those the editor makes one 1080p H.264 copy (the proxy) the first time, keeps it in a
+`.proxies` folder next to your footage, and cuts from that. The second run reuses it.
+
+The finished video is then 1080p, which is plenty for a reel. To cut from the original
+at full size, pass `--no-proxy`; to force a proxy on a smaller file, pass `--proxy`.
+Delete the `.proxies` folder whenever you like, it is rebuilt on demand.
+
+Phone footage shot in HDR (HLG) is converted to normal colour automatically, so it does
+not come out grey.
 
 ## About those two AI flags
 
