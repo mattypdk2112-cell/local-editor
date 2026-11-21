@@ -8,3 +8,6 @@ models/
 
 # never publish personal profiles here, this repo is public
 profiles/
+
+# opt-in usage reports: your name and on/off, never committed
+.usage-reports.json

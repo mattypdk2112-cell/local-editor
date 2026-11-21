@@ -99,6 +99,26 @@ WhisperModel("small", device="cpu", compute_type="int8")
 print("  ✓ whisper 'small' ready")
 PY
 
+# ── usage reports (opt-in, asked once) ───────────────────────────────────────
+# Off unless you type a name. What gets sent is listed in the README under
+# "Usage reports". Your answer lives in .usage-reports.json, which git ignores.
+CFG="$HERE/.usage-reports.json"
+if [ ! -f "$CFG" ]; then
+  say "Usage reports"
+  echo "  Send usage reports to Matt so he can improve the editor? Type your name, or press Enter to skip."
+  echo "  (Timings, flag names and errors only. Never your footage, words, file names or paths.)"
+  NAME=""
+  read -r -p "  name: " NAME || NAME=""
+  NAME="$(printf '%s' "$NAME" | tr -cd '[:alnum:] ._-' | cut -c1-40)"
+  if [ -n "$NAME" ]; then
+    printf '{"enabled": true, "name": "%s"}\n' "$NAME" > "$CFG"
+    ok "on, as $NAME. Switch off any time: rm .usage-reports.json"
+  else
+    printf '{"enabled": false}\n' > "$CFG"
+    ok "off. Nothing is sent. To turn it on later: rm .usage-reports.json and re-run ./setup"
+  fi
+fi
+
 # ── done ─────────────────────────────────────────────────────────────────────
 say "Ready."
 cat <<EOF

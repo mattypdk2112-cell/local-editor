@@ -11,7 +11,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from src import sequence
+from src import sequence, telemetry
 
 
 def main() -> int:
@@ -24,15 +24,18 @@ def main() -> int:
     p.add_argument("--out", type=Path, default=None, help="write here instead of the recipe's out folder")
     a = p.parse_args()
     r = sequence.load(a.recipe, out=a.out)
+    telemetry.note(clips=len(r.get("pieces") or []))
     joined = r["_out"] / f"{r['name']} sections.mp4"
     if a.step in ("sections", "all"):
+        telemetry.stage("sections")
         print("[sections]")
         joined = sequence.sections(r)
     if a.step in ("finish", "all"):
+        telemetry.stage("finish")
         print("[finish]")
         sequence.finish(r, a.body or joined, a.version)
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(telemetry.wrap("reel", main))

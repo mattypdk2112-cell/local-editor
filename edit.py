@@ -53,6 +53,7 @@ from src import scriptmatch as scriptmatch_mod  # noqa: E402
 from src import titlecard as titlecard_mod  # noqa: E402
 from src import transcribe as transcribe_mod  # noqa: E402
 from src import geometry as geometry_mod  # noqa: E402
+from src import telemetry  # noqa: E402
 from src import util as util_mod  # noqa: E402
 from src.util import (proxy_for, merge_overlaps, close_intraword_gaps, boundary_report, detect_silence, dump_json, fmt_secs, load_json,  # noqa: E402
                       next_versioned_path, probe)
@@ -320,6 +321,7 @@ def main() -> int:
     print(f"\n▶ project: {project.relative_to(ROOT)}")
 
     info = probe(video)
+    telemetry.note(input_duration_s=info["duration"], input_width=info["width"], input_height=info["height"])
     print(f"  source: {info['width']}x{info['height']} {info.get('codec') or '?'}  {fmt_secs(info['duration'])}  "
           f"{info['fps']}fps  audio={'yes' if info['has_audio'] else 'NO'}")
     # Every stage decodes the whole clip from the top, and 1440p+ or HEVC/ProRes/AV1/VP9
@@ -359,6 +361,7 @@ def main() -> int:
             return 1
 
     # 1 — transcribe (cache per project so the iterate loop doesn't re-run whisper)
+    telemetry.stage("transcribe")
     print("\n[1/4] transcribe")
     cached = project / "transcript.json"
     if cached.exists() and not args.fresh:
@@ -412,6 +415,7 @@ def main() -> int:
     # 1.25 — DRAFT the story from the raw transcript (the brain writes story.txt).
     # Only when no explicit --script was given; --draft then feeds 1.5a.
     if args.draft and not script_lines and not args.no_cut:
+        telemetry.stage("draft")
         print("\n[+] draft — writing the story from the raw transcript")
         prov = drafter_mod.resolve_provider(ROOT, prefer_model=args.draft_model)
         if not prov:
@@ -465,6 +469,7 @@ def main() -> int:
             # the model only with --llm-align (and only if a Gemini key is present).
             key = (llm_mod.load_env_key("GEMINI_API_KEY", project_root=ROOT)
                    or llm_mod.load_env_key("GEMINI_KEY", project_root=ROOT))
+            telemetry.stage("scriptmatch")
             if args.llm_align and key:
                 print("\n[+] script-aware cutting (LLM, --llm-align)")
                 al = scriptmatch_mod.align_script(transcript, script_lines,
@@ -504,6 +509,8 @@ def main() -> int:
     # only this pass can see it.
     bad_spans: list[list[float]] = []
     bt_cache = project / "bad_takes.json"
+    if args.bad_takes and not args.no_cut:
+        telemetry.stage("badtakes")
     if args.bad_takes and not args.no_cut and bt_cache.exists() and not args.fresh:
         import json as _json
         cachedbt = _json.loads(bt_cache.read_text())
@@ -547,6 +554,7 @@ def main() -> int:
     # the audio. Free, deterministic, no API key. See src/retakes.py.
     retake_spans: list[list[float]] = []
     if args.retakes and not args.no_cut and wav.exists():
+        telemetry.stage("retakes")
         print("\n[1.75] retake sweep")
         rt = retakes_mod.find(wav, transcript["words"], model_size=args.model,
                               vocab=args.vocab)
@@ -571,6 +579,7 @@ def main() -> int:
             bad_spans = (bad_spans or []) + [[r["start"], r["end"]] for r in reps]
 
     # 2 — rough cut (unless script-aware cutting already produced a cut)
+    telemetry.stage("roughcut")
     print("\n[2/4] rough cut")
     if cut is None:
         if args.no_cut:
@@ -735,6 +744,7 @@ def main() -> int:
     if card_only:
         caption_from_cut = True
     if args.captions and not caption_from_cut:
+        telemetry.stage("captions")
         print("\n[3/4] captions")
         captions_path = write_captions(cut["kept_words"], cut["ranges"],
                                        geo["width"], geo["height"])
@@ -797,6 +807,7 @@ def main() -> int:
     # An AUDIO-ONLY concat answers both in seconds, so the video is encoded once
     # instead of encoded, measured and encoded again.
     if (args.verify or args.breath_trim) and not args.no_cut and cut["ranges"] and wav.exists():
+        telemetry.stage("loudness")
         print("\n[2.95] measuring the assembled audio")
 
         def _proxy() -> Path:
@@ -884,6 +895,7 @@ def main() -> int:
         if cut["kept_duration"] != started:
             print(f"  {started:.2f}s -> {cut['kept_duration']:.2f}s before the encode")
 
+    telemetry.stage("assemble")
     print("\n[4/4] assemble")
     music = args.music.expanduser().resolve() if args.music else None
     # Lands in ~/Downloads unless told otherwise. Not beside the input: defaulting to
@@ -923,6 +935,7 @@ def main() -> int:
         dump_json(sig_path, music_sig)
 
     if caption_from_cut:
+        telemetry.stage("captions")
         print("\n[3/4] captions — transcribing the cut")
         # Reuse a cut transcript that's already here unless the cut changed length.
         # Captions get BURNED IN, so a word whisper got wrong is unfixable after the
@@ -1015,6 +1028,7 @@ def main() -> int:
             print(f"  pin: source {args.pin:.1f}s landed at {landed:.1f}s in the cut")
 
     out_info = probe(result["project_out"])
+    telemetry.note(output_duration_s=out_info["duration"])
     print(f"\n✅ done — {fmt_secs(out_info['duration'])} (from {fmt_secs(info['duration'])})")
     print(f"   project : {result['project_out']}")
     print(f"   exported: {result['exported_out']}")
@@ -1029,4 +1043,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(telemetry.wrap("edit", main))
