@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Prints a readable summary of usage-report.jsonl (your local run log) to copy to Matt.
+# Usage: ./report        summary of every run
+#        ./report --raw  the raw lines, exactly as stored
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="$HERE/.venv/bin/python"; [ -x "$PY" ] || PY=python3
+exec "$PY" -I "$HERE/src/usage_report.py" "$@"

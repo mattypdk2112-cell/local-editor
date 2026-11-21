@@ -1,15 +1,20 @@
-"""Opt-in usage reports. Off unless you typed a name into ./setup.
+"""Usage log. Every run appends one line to usage-report.jsonl in the repo folder.
 
-What one report holds (and nothing else): your tester name, the time, the editor's
-git version, your OS, which flag NAMES you used (never their values), the input's
-length and frame size, how long each stage took, whether it worked, and on a crash
-the error text and the last few traceback lines with every path and filename
-scrubbed out. Never footage, transcript text, file paths or filenames.
+That file never leaves your machine on its own. ./report prints it in a readable
+form you can copy to Matt. Only if you pasted an invite code from Matt into
+./setup is the same line also sent to him.
 
-The send runs in a detached background process with a 4 second timeout, so a slow
+What one line holds (and nothing else): the time, the editor's git version, your
+OS, which flag NAMES you used (never their values), the input's length and frame
+size, how long each stage took, whether it worked, and on a crash the error text
+and the last few traceback lines with every path and filename scrubbed out. Never
+footage, transcript text, file paths or filenames.
+
+A send runs in a detached background process with a 4 second timeout, so a slow
 or dead network can never slow down or break an edit.
 
-Switch it off: delete .usage-reports.json, or set LOCAL_EDITOR_REPORTS=0.
+Stop sending: delete .usage-reports.json, or set LOCAL_EDITOR_REPORTS=0.
+Clear the log: rm usage-report.jsonl
 """
 from __future__ import annotations
 
@@ -27,6 +32,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / ".usage-reports.json"
+LOG = ROOT / "usage-report.jsonl"
 LAST = ROOT / "projects" / ".last-usage-report.json"
 ENDPOINT = "https://kssffxnusvvexzoqsiev.supabase.co/functions/v1/local-editor-report"
 TIMEOUT = 4.0
@@ -35,17 +41,15 @@ _run: dict | None = None
 _stage: tuple[str, float] | None = None
 
 
-def _config() -> dict | None:
+def _invite() -> str | None:
+    """The invite code from ./setup, or None. Without one nothing is ever sent."""
     if os.environ.get("LOCAL_EDITOR_REPORTS", "").strip() in ("0", "off", "no", "false"):
         return None
     try:
-        cfg = json.loads(CONFIG.read_text())
+        code = str(json.loads(CONFIG.read_text()).get("invite") or "").strip()
     except Exception:
         return None
-    name = str(cfg.get("name") or "").strip()
-    if not cfg.get("enabled") or not name:
-        return None
-    return {"name": name[:40]}
+    return code[:80] if re.fullmatch(r"[A-Za-z0-9_-]{8,80}", code) else None
 
 
 def _version() -> str:
@@ -113,12 +117,9 @@ def _tb_lines(exc: BaseException) -> list[str]:
 
 def start(tool: str, argv: list[str]) -> None:
     global _run
-    cfg = _config()
-    if not cfg:
-        return
     hide(*[a.split("=", 1)[1] if a.startswith("--") else a
            for a in argv if not a.startswith("--") or "=" in a])
-    _run = {"run_id": str(uuid.uuid4()), "tester": cfg["name"], "tool": tool,
+    _run = {"run_id": str(uuid.uuid4()), "tool": tool,
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "version": _version(),
             "os": f"{platform.system()} {platform.release()} {platform.machine()}",
@@ -147,7 +148,7 @@ def stage(name: str) -> None:
 
 
 def finish(exit_code: int, exc: BaseException | None = None) -> None:
-    """Close the run and hand the report to a background sender. Never raises."""
+    """Close the run, append it to the local log, and send it only with an invite. Never raises."""
     global _run
     try:
         if _run is None:
@@ -164,10 +165,18 @@ def finish(exit_code: int, exc: BaseException | None = None) -> None:
             run["traceback"] = _tb_lines(exc)
         elif isinstance(exc, KeyboardInterrupt):
             run["error"] = "KeyboardInterrupt"
+        try:
+            with LOG.open("a") as f:
+                f.write(json.dumps(run) + "\n")
+        except Exception:
+            pass
+        code = _invite()
+        if not code:
+            return
         p = subprocess.Popen([sys.executable, "-I", str(Path(__file__)), "--send"],
                              stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True)
-        p.stdin.write(json.dumps(run).encode())
+        p.stdin.write(json.dumps({"invite": code, **run}).encode())
         p.stdin.close()
     except Exception:
         pass
@@ -195,6 +204,7 @@ def wrap(tool: str, main) -> int:
 def _send() -> None:
     import urllib.request
     body = sys.stdin.buffer.read()
+    shown = {k: v for k, v in json.loads(body).items() if k != "invite"}
     status: dict = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     try:
         req = urllib.request.Request(ENDPOINT, data=body, method="POST",
@@ -206,7 +216,7 @@ def _send() -> None:
         status["error"] = type(e).__name__
     try:
         LAST.parent.mkdir(parents=True, exist_ok=True)
-        LAST.write_text(json.dumps({"sent": json.loads(body), "result": status}, indent=1))
+        LAST.write_text(json.dumps({"sent": shown, "result": status}, indent=1))
     except Exception:
         pass
 

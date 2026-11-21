@@ -181,15 +181,15 @@ of them.
 
 ## Usage reports
 
-Off unless you say yes. `./setup` asks once: type your name to send Matt a short
-report after each `./edit` and `./reel` run, or press Enter to skip. Your answer is
-kept in `.usage-reports.json`, which git ignores.
+Every `./edit` and `./reel` run adds one line to `usage-report.jsonl` in this folder.
+That file always exists once you have run the editor, it is ignored by git, and it
+never leaves your machine on its own. `./report` prints it as a short summary you can
+copy and send to Matt if you want to (`./report --raw` shows the lines as stored).
 
-Each report is one row with exactly these fields:
+Each line holds exactly these fields:
 
-- `tester`: the name you typed
 - `tool`: edit or reel
-- `run_id`: a random id, so a report is never counted twice
+- `run_id`: a random id, so a run is never counted twice
 - `ts`: when the run started (UTC)
 - `version`: the editor's git commit
 - `os`, `python`: for example `Darwin 25.6.0 arm64`, `3.9.6`
@@ -198,18 +198,23 @@ Each report is one row with exactly these fields:
 - `output_duration_s`, `clips`: length of the result, and how many clips a reel used
 - `stages`, `total_s`: seconds per stage (transcribe, roughcut, assemble...) and in total
 - `ok`, `exit_code`: whether it worked
-- `error`, `traceback`: only on a crash. The error message with every path, filename and
-  quoted text replaced by `<path>`, `<file>` or `<text>`, and the last 8 lines of the
-  editor's own code it passed through (like `src/assemble.py:120 in assemble`)
+- `error`, `traceback`: only on a crash. The error message with every path, filename,
+  argument value and quoted text replaced by `<path>`, `<file>`, `<hidden>` or `<text>`,
+  and the last 8 lines of the editor's own code it passed through
+  (like `src/assemble.py:120 in assemble`)
 
-Never your footage, transcript text, file paths or filenames. The exact copy of your
-last report is saved at `projects/.last-usage-report.json` so you can check.
+Never your footage, transcript text, file paths or filenames.
 
-It is sent from a background process with a 4 second timeout, so it never slows down
-or breaks an edit, and nothing is retried.
+**Nothing is sent without an invite code.** `./setup` asks once: "Got an invite code
+from Matt? Paste it, or press Enter to skip." Matt hands codes out personally. With a
+code, each line is also sent to him from a background process with a 4 second timeout,
+so it never slows down or breaks an edit, and the copy that was sent is kept at
+`projects/.last-usage-report.json`. Without one, nothing ever leaves your laptop.
+There are no notifications or alerts on either side.
 
-**Switch it off:** `rm .usage-reports.json` (then `./setup` asks again next time), set
-`{"enabled": false}` in that file, or run with `LOCAL_EDITOR_REPORTS=0`.
+**Stop sending:** `rm .usage-reports.json` (`./setup` asks again next time), or run with
+`LOCAL_EDITOR_REPORTS=0`.
+**Delete the log:** `rm usage-report.jsonl`. It starts fresh on the next run.
 
 ## Licence
 
