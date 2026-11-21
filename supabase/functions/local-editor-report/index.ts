@@ -79,7 +79,7 @@ async function summary(): Promise<Response> {
     .map(([k, v]) => `${k}: ${v.runs} runs, ${v.fails} failed, avg ${(v.secs / v.runs).toFixed(0)}s`);
   const body = `Local editor, last 7 days\n${n} runs, average ${avg}s\n` + (lines.join("\n") || "no runs");
   const tg = await telegram(body);
-  await db.from("local_editor_summaries").insert({ body });
+  if (tg === "sent") await db.from("local_editor_summaries").insert({ body });
   return json({ ok: true, telegram: tg, runs: n });
 }
 
