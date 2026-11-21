@@ -61,12 +61,35 @@ def _flags(argv: list[str]) -> list[str]:
     return sorted({a.split("=", 1)[0] for a in argv if a.startswith("--")})[:60]
 
 
+_EXT = r"(?:mp4|mov|m4v|mkv|avi|mxf|wav|mp3|m4a|aac|flac|json|txt|srt|ass|png|jpe?g|heic)"
+# A path to a media file may hold spaces ("/Users/x/Desktop/My Client take 2.mp4"), so
+# that form is matched first, up to its extension.
+_MEDIA_PATH = re.compile(r"""(?:~|/)[^\n'"]*?\.""" + _EXT + r"\b", re.I)
 _PATH = re.compile(r"""(?:~|/|[A-Za-z]:\\)[^\s'",;:()\[\]]*""")
-_FILE = re.compile(r"""[^\s'",;:()\[\]/]+\.(?:mp4|mov|m4v|mkv|avi|mxf|wav|mp3|m4a|aac|flac|json|txt|srt|ass|png|jpe?g|heic)\b""", re.I)
+_FILE = re.compile(r"""[^\s'",;:()\[\]/]+\.""" + _EXT + r"\b", re.I)
+_hidden: set[str] = set()
+
+
+def hide(*values) -> None:
+    """Never send these strings (argv values, recipe file names), whole or as a name or stem."""
+    for v in values:
+        try:
+            v = str(v).strip()
+            if len(v) < 3:
+                continue
+            q = Path(v).expanduser()
+            for x in {v, str(q), str(q.resolve()), q.name, q.stem}:
+                if len(x) >= 3:
+                    _hidden.add(x)
+        except Exception:
+            pass
 
 
 def scrub(text: str) -> str:
     """Drop anything that looks like a path, a filename, or a quoted string."""
+    for v in sorted(_hidden, key=len, reverse=True):
+        text = text.replace(v, "<hidden>")
+    text = _MEDIA_PATH.sub("<path>", text)
     text = _PATH.sub("<path>", text)
     text = _FILE.sub("<file>", text)
     text = re.sub(r"'[^']{2,}'|\"[^\"]{2,}\"", "<text>", text)
@@ -93,6 +116,8 @@ def start(tool: str, argv: list[str]) -> None:
     cfg = _config()
     if not cfg:
         return
+    hide(*[a.split("=", 1)[1] if a.startswith("--") else a
+           for a in argv if not a.startswith("--") or "=" in a])
     _run = {"run_id": str(uuid.uuid4()), "tester": cfg["name"], "tool": tool,
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "version": _version(),

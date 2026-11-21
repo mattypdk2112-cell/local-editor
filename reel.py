@@ -25,6 +25,7 @@ def main() -> int:
     a = p.parse_args()
     r = sequence.load(a.recipe, out=a.out)
     telemetry.note(clips=len(r.get("pieces") or []))
+    telemetry.hide(r.get("name"), *[pc.get("file") for pc in (r.get("pieces") or []) if isinstance(pc, dict)])
     joined = r["_out"] / f"{r['name']} sections.mp4"
     if a.step in ("sections", "all"):
         telemetry.stage("sections")
