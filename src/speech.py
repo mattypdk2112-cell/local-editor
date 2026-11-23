@@ -302,6 +302,16 @@ def tighten(ranges: list[list[float]], runs: list[tuple[float, float]], *,
                     word_fix["head_word"] = [round(na, 3), cand]
                     na = cand
 
+        # Never snap an edge back INTO a span that was cut on purpose (a bad take, a
+        # retake). Speech can run straight from a kept line into a false start with no
+        # pause ("work? Top 10 things that,"), so the measured run's edge sits inside the
+        # flagged words and snapping to it put them back (white hoodie test, 23 Nov 2026).
+        for p0, p1 in protect:
+            if na < p1 <= a + 0.15 and p1 < nb:
+                na = round(p1, 3)
+            if b - 0.15 <= p0 < nb and p0 > na:
+                nb = round(p0, 3)
+
         entry = {
             "range": [a, b], "action": "tightened", "new": [na, nb],
             "head_slop": round(on - a, 3),      # >0 = silence we were carrying

@@ -277,7 +277,8 @@ def boundary_report(ranges: list[list[float]], words: list[dict],
 
 def snap_to_pause(ranges: list[list[float]], words: list[dict], *,
                   min_silence: float = 0.20, max_shift: float = 1.20,
-                  restore_shift: float = 2.50
+                  restore_shift: float = 2.50,
+                  protect: list[list[float]] | None = None,
                   ) -> tuple[list[list[float]], list[str]]:
     """Move edges that `boundary_report` flags onto real silence. (ranges, notes).
 
@@ -290,8 +291,14 @@ def snap_to_pause(ranges: list[list[float]], words: list[dict], *,
     Both edges are moved INWARD — a start goes later, an end goes earlier — so
     the repair always removes the fragment rather than restoring more of the take
     around it. `max_shift` stops it eating a real line when a whole passage was
-    said without a breath.
+    said without a breath. `protect` = spans cut on purpose (bad takes, retakes): a
+    restore never reaches back into one, or it would undo that cut.
     """
+    protect = protect or []
+
+    def hits_protect(x: float, y: float) -> bool:
+        return any(p0 < y and x < p1 for p0, p1 in protect)
+
     if not ranges or not words:
         return [list(r) for r in ranges], []
 
@@ -369,7 +376,7 @@ def snap_to_pause(ranges: list[list[float]], words: list[dict], *,
             # said. If restoring really does re-expose a duplicate take, the
             # repeat check on the assembled audio removes it downstream.
             t = run_start_before(a)
-            if t is not None and 0 < a - t <= restore_shift:
+            if t is not None and 0 < a - t <= restore_shift and not hits_protect(t, a):
                 notes.append(f"no blade at range {i} start {a:.2f} — restored to "
                              f"{t:.2f} (+{a - t:.2f}s) rather than leave a fragment")
                 out[i][0] = round(t, 3)
@@ -381,7 +388,7 @@ def snap_to_pause(ranges: list[list[float]], words: list[dict], *,
                 out[i][1] = round(t, 3)
                 continue
             t = run_end_after(b)
-            if t is not None and 0 < t - b <= restore_shift:
+            if t is not None and 0 < t - b <= restore_shift and not hits_protect(b, t):
                 notes.append(f"no blade at range {i} end {b:.2f} — restored to "
                              f"{t:.2f} (+{t - b:.2f}s) rather than leave a fragment")
                 out[i][1] = round(t, 3)

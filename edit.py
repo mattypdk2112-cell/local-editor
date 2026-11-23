@@ -614,6 +614,10 @@ def main() -> int:
         cut["kept_duration"] = round(sum(b - a for a, b in cut["ranges"]), 3)
         print(f"  retakes removed: {before:.2f}s -> {cut['kept_duration']:.2f}s")
 
+    # Every span removed on purpose (bad takes, retakes, earlier repeats). The edge
+    # passes below may move a blade but never back into one of these.
+    cut_on_purpose = (bad_spans or []) + retake_spans
+
     # 2.5 — TIGHTEN every range against the waveform. plan_cut places blades using
     # whisper's word times, which drift from the real onset and can sit inside a
     # word. Snapping to measured speech removes the head slop that makes a cut drag
@@ -621,10 +625,10 @@ def main() -> int:
     # tails that were being clipped. Also drops any range holding no speech at all.
     if args.tighten and not args.no_cut and wav.exists():
         runs = speech_mod.speech_runs(wav, noise_db=args.noise_db)
-        # `protect` = the retake spans just removed. Without it the forward reach
-        # could bridge straight back into a bad take whose first words sit within
-        # a breath of the previous range's end.
-        tight, report = speech_mod.tighten(cut["ranges"], runs, protect=retake_spans)
+        # `protect` = every span cut on purpose. Without it the forward reach (and
+        # the snap to the measured run) could go straight back into a bad take whose
+        # first words sit within a breath of the kept range's edge.
+        tight, report = speech_mod.tighten(cut["ranges"], runs, protect=cut_on_purpose)
         if tight:
             slop = sum(r["head_slop"] for r in report if r["action"] == "tightened")
             clip = [r for r in report if r.get("tail_clip", 0) < 0]
@@ -765,7 +769,8 @@ def main() -> int:
     # word short and the range opened on the orphaned "do". Snap the edge onto
     # real silence first, then report only what could not be snapped.
     if not args.no_cut:
-        snapped, snotes = util_mod.snap_to_pause(cut["ranges"], transcript["words"])
+        snapped, snotes = util_mod.snap_to_pause(cut["ranges"], transcript["words"],
+                                                 protect=cut_on_purpose)
         if snotes:
             for n in snotes:
                 print(f"  {n}")
