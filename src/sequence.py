@@ -26,7 +26,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .util import dump_json, probe, proxy_for, run
+from .util import dump_json, hlg_filter, probe, proxy_for, run
 
 HERE = Path(__file__).resolve().parent.parent
 MONO_LOSS_DB = 6.0      # a stereo sound that loses more than this folded to mono is phase-cancelling
@@ -177,6 +177,9 @@ def sections(r: dict) -> Path:
     t = 0.0
     for i, p in enumerate(_expand(r)):
         src = _src(r, p)
+        # Read HLG on the ORIGINAL: a proxy can lose the tags. HLG pixels always need the
+        # tone-map to Rec.709, or the piece renders grey and washed out.
+        tone = hlg_filter(_path(r, p["file"], "footage_dir"))
         info = probe(src)
         a = float(p.get("in", 0.0))
         b = float(p["out"]) if p.get("out") is not None else info["duration"]
@@ -189,7 +192,7 @@ def sections(r: dict) -> Path:
         # with no black bars. x_pct / y_pct move the crop (0 = left/top, 50 = centre).
         cx = float(p.get("x_pct", 50)) / 100
         cy = float(p.get("y_pct", 50)) / 100
-        graph.append(f"[{i}:v]setpts=PTS-STARTPTS,scale={W}:{H}:force_original_aspect_ratio=increase,"
+        graph.append(f"[{i}:v]setpts=PTS-STARTPTS,{tone}scale={W}:{H}:force_original_aspect_ratio=increase,"
                      f"crop={W}:{H}:(iw-{W})*{cx:.3f}:(ih-{H})*{cy:.3f}{extra},"
                      f"fps={fn}/{fd},tpad=stop_mode=clone:stop=2,trim=end_frame={frames},"
                      f"setpts=PTS-STARTPTS,format=yuv420p,setsar=1[v{i}]")

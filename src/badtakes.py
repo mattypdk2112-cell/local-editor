@@ -243,14 +243,19 @@ def stutters(words: list[dict], *, min_len: int = 1, max_len: int = 8,
             break
         if hit:
             span = words[i:i + 2 * hit]
+            # How many times the phrase runs back to back. "profit profit profit"
+            # is a speaker hitting a word on purpose; a cut artefact is a double.
+            run, j = 2, i + 2 * hit
+            while norms[j:j + hit] == norms[i:i + hit]:
+                run, j = run + 1, j + hit
             out.append({"start": round(float(span[0]["start"]), 2),
                         "end": round(float(span[-1]["end"]), 2),
                         # where the SECOND copy begins. This is the repair point:
                         # everything before it is the take that should not be here.
                         "mid": round(float(span[hit]["start"]), 2),
                         "text": " ".join(w["word"].strip() for w in span),
-                        "n": hit})
-            i += 2 * hit
+                        "n": hit, "run": run})
+            i += run * hit
         else:
             i += 1
     return out
@@ -299,6 +304,13 @@ def repeat_spans(ranges: list[list[float]], reps: list[dict], *,
     drop: list[list[float]] = []
     notes: list[str] = []
     for rep in reps:
+        # Three or more in a row is emphasis, never a retake: on 2026-11-21 a
+        # speaker's "profit, profit, profit is my point" sat on a join, and three
+        # passes of this function cut it to "Profit is my point".
+        if rep.get("run", 2) >= 3:
+            notes.append(f"{rep['text']!r} said {rep['run']} times in a row at "
+                         f"{rep['start']:.2f}s reads as emphasis, left alone")
+            continue
         first = [rep["start"], max(rep["start"], rep["mid"] - pad)]
         near_seam = any(abs(s - rep["start"]) <= head_window
                         or first[0] <= s <= rep["mid"] for s in seams)
@@ -339,3 +351,23 @@ def _subtract(ranges: list[list[float]], spans: list[list[float]]) -> list[list[
                 nxt.append([max(sb, a), b])
         out = nxt
     return [[round(a, 3), round(b, 3)] for a, b in out if b - a > 0]
+
+
+def repeated_lines(segments: list[dict], *, min_words: int = 3, sim: float = 0.8) -> list[dict]:
+    """Every line said again later in the clip, except its last take: [{start, end, text}] to cut.
+
+    No time window: a retake said 15 s after the first try is still a retake. Lines are
+    whisper segments; near-identical = 80% of the normalised text matches, both 3+ words.
+    """
+    from difflib import SequenceMatcher
+    norm = [" ".join(_norm(w) for w in s.get("text", "").split() if _norm(w)) for s in segments]
+    out = []
+    for i, a in enumerate(norm):
+        if len(a.split()) < min_words:
+            continue
+        for b in norm[i + 1:]:
+            if len(b.split()) >= min_words and SequenceMatcher(None, a, b).ratio() >= sim:
+                s = segments[i]
+                out.append({"start": float(s["start"]), "end": float(s["end"]), "text": s.get("text", "").strip()})
+                break
+    return out

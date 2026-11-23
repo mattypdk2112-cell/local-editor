@@ -8,3 +8,7 @@ models/
 
 # never publish personal profiles here, this repo is public
 profiles/
+
+# local usage log and the optional invite code, never committed
+.usage-reports.json
+usage-report.jsonl

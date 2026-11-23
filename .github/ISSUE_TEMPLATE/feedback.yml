@@ -1,0 +1,35 @@
+name: Feedback
+description: Tell Matt how the editor went for you, good or bad.
+title: "Feedback: "
+labels: ["feedback"]
+body:
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried
+      description: The command you ran and what kind of video it was (length, camera or phone). No need to attach footage.
+      placeholder: ./edit ~/Desktop/take.mp4 --captions, a 3 minute iPhone talking head
+    validations:
+      required: true
+  - type: textarea
+    id: broke
+    attributes:
+      label: What broke
+      description: What went wrong or looked off. Paste the last lines of the terminal if it crashed.
+    validations:
+      required: false
+  - type: textarea
+    id: change
+    attributes:
+      label: What you would change
+      description: The one thing that would make it more useful to you.
+    validations:
+      required: false
+  - type: dropdown
+    id: rating
+    attributes:
+      label: Rating
+      description: How useful was it, 1 (not at all) to 5 (I'd use it every week)?
+      options: ["1", "2", "3", "4", "5"]
+    validations:
+      required: true

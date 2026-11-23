@@ -38,6 +38,17 @@ WHITE = "FFFFFF"
 AMBER = "3CB1F5"        # #F5B13C
 
 
+# The Title/Credit styles render BOLD with Spacing=0.5, but FontMetrics loads the
+# REGULAR face and measures bare advances. Laying out against that under-measures
+# the text, and a centred title then spills onto the mark on its left.
+_ASS_SPACING = 0.5   # matches the Spacing field in the Style lines
+_BOLD_WIDEN = 1.04   # bold is a few percent wider than regular; estimate, not measured
+
+def _rendered_width(fm, text: str, size: float) -> float:
+    """Width as ASS will actually draw it: bold, with per-character spacing."""
+    return fm.text_width(text, size) * _BOLD_WIDEN + _ASS_SPACING * max(0, len(text) - 1)
+
+
 def _tc(t: float) -> str:
     h, r = divmod(max(0.0, t), 3600)
     m, s = divmod(r, 60)
@@ -103,9 +114,13 @@ def build(
     def dlg(a, b, style, text, layer=2):
         ev.append(f"Dialogue: {layer},{_tc(a)},{_tc(b)},{style},,0,0,0,,{text}")
 
+    # Line 2 of the `plate` card, declared here because the Style lines below need it
+    # too. 0.70 of line 1, picked by eye from a side-by-side still.
+    plate_l2 = round(t_size * 0.70)
+
     if variant == "badge":
         # A pill naming the product. The default, and what A ships.
-        tw = fm.text_width(title, t_size)
+        tw = _rendered_width(fm, title, t_size)
         gap = round(mark_px * 0.26)
         group = (mark_px + gap + tw) if mark else tw
         x0 = (width - group) / 2.0
@@ -127,6 +142,54 @@ def build(
                 "{\\an8\\pos(%.0f,%.0f)\\fad(%d,260)}%s"
                 % (width / 2, by, b_fade, benefit))
         mark_x, mark_y = int(round(x0)), int(round(top_y + pad_y))
+
+    elif variant == "native":
+        # Instagram's own "Classic" text look: white, no box, a soft shadow so it holds
+        # on a dark room AND a bright screen. title_y_pct here is the BOTTOM of the
+        # text block, so it can sit just above whatever is in the shot.
+        lines = [x for x in (title, benefit) if x]
+        dlg(0, title_out, "Native",
+            "{\\an2\\pos(%.0f,%.0f)\\fad(0,260)}%s" % (width / 2, top_y, "\\N".join(lines)))
+    elif variant == "plate":
+        # Line 1 is BLACK text on an opaque WHITE rounded plate, line 2 is WHITE text on
+        # an opaque BLACK plate underneath, smaller and centred under line 1.
+        l1_size = t_size
+        # Shrink both lines to fit 90% of the frame width, or a long hook on a 9:16
+        # frame runs off both edges.
+        _w = _rendered_width(fm, title, l1_size) + round(l1_size * 0.60)
+        if _w > width * 0.90:
+            _k = width * 0.90 / _w
+            l1_size = t_size = round(l1_size * _k)   # t_size drives the PlateText style
+            plate_l2 = round(plate_l2 * _k)
+        l2_size = plate_l2
+        # Tight padding is what makes the words fill their plate: cap height is ~70%
+        # of the em, so generous padding leaves small-looking text in a big box.
+        pad_x1, pad_y1 = round(l1_size * 0.30), round(l1_size * 0.07)
+        pad_x2, pad_y2 = round(l2_size * 0.42), round(l2_size * 0.09)
+
+        w1 = _rendered_width(fm, title, l1_size)
+        p1_w, p1_h = w1 + pad_x1 * 2, l1_size + pad_y1 * 2
+        p1_x = (width - p1_w) / 2.0
+        y1 = top_y
+
+        dlg(0, title_out, "PlateW",
+            "{\\an7\\pos(%.0f,%.0f)\\1c&HFFFFFF&\\1a&H00&\\bord0\\shad0\\fad(0,260)\\p1}%s{\\p0}"
+            % (p1_x, y1, _rounded_rect(p1_w, p1_h, p1_h * 0.22)), layer=0)
+        dlg(0, title_out, "PlateText",
+            "{\\an5\\pos(%.0f,%.0f)\\fad(0,260)}%s"
+            % (p1_x + p1_w / 2.0, y1 + p1_h / 2.0, title), layer=1)
+
+        if benefit:
+            w2 = _rendered_width(fm, benefit, l2_size)
+            p2_w, p2_h = w2 + pad_x2 * 2, l2_size + pad_y2 * 2
+            p2_x = p1_x + (p1_w - p2_w) / 2.0
+            y2 = y1 + p1_h + round(l1_size * 0.18)
+            dlg(benefit_in, title_out, "PlateB",
+                "{\\an7\\pos(%.0f,%.0f)\\1c&H000000&\\1a&H00&\\bord0\\shad0\\fad(%d,260)\\p1}%s{\\p0}"
+                % (p2_x, y2, b_fade, _rounded_rect(p2_w, p2_h, p2_h * 0.26)), layer=0)
+            dlg(benefit_in, title_out, "PlateBText",
+                "{\\an5\\pos(%.0f,%.0f)\\fad(%d,260)}%s"
+                % (p2_x + p2_w / 2.0, y2 + p2_h / 2.0, b_fade, benefit), layer=1)
 
     else:
         # headline / problem: no pill. Two stacked lines carry the claim, and the
@@ -157,14 +220,16 @@ def build(
                     "{\\an8\\pos(%.0f,%.0f)\\fad(%d,260)}%s"
                     % (width / 2, y2, b_fade, benefit))
 
-        cred = credit or "Claude Code Editor"
-        cw = fm.text_width(cred, c_size)
+        # "" or "none" means DRAW NO CREDIT (it used to fall back to a default line).
+        cred = "" if (credit or "").strip().lower() in ("", "none", "off") else credit
+        cw = _rendered_width(fm, cred, c_size) if cred else 0
         gap = round(mark_size * 0.30)
         group = (mark_size + gap + cw) if mark else cw
         x0 = (width - group) / 2.0
-        dlg(0, title_out, "Credit",
-            "{\\an7\\pos(%.0f,%.0f)\\fad(0,260)}%s"
-            % (x0 + (mark_size + gap if mark else 0), yc, cred))
+        if cred:
+            dlg(0, title_out, "Credit",
+                "{\\an7\\pos(%.0f,%.0f)\\fad(0,260)}%s"
+                % (x0 + (mark_size + gap if mark else 0), yc, cred))
         mark_x = int(round(x0))
         mark_y = int(round(yc - (mark_size - c_size) / 2.0))
 
@@ -193,6 +258,16 @@ def build(
         "&H00000000,&HB0000000,1,0,0,0,100,100,0.4,0,1,0,4,8,0,0,0,1",
         f"Style: Credit,{font},{round(height * 0.0201 * scale)},&H00D8D8D8,&H00D8D8D8,"
         "&H00000000,&HA0000000,1,0,0,0,100,100,1.2,0,1,0,3,7,0,0,0,1",
+        f"Style: PlateW,{font},{t_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,"
+        "0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1",
+        f"Style: PlateText,{font},{t_size},&H00000000,&H00000000,&H00000000,&H00000000,"
+        "1,0,0,0,100,100,0.2,0,1,0,0,5,0,0,0,1",
+        f"Style: PlateB,{font},{plate_l2},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,"
+        "0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1",
+        f"Style: PlateBText,{font},{plate_l2},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,"
+        "1,0,0,0,100,100,0.2,0,1,0,0,5,0,0,0,1",
+        f"Style: Native,{font},{round(height * 0.0305 * scale)},&H00FFFFFF,&H00FFFFFF,&H00000000,&H90000000,"
+        "0,0,0,0,100,100,0,0,1,0,3,2,0,0,0,1",
         f"Style: CTAbig,{font},{round(height * 0.0479)},&H00{WHITE},&H00{WHITE},"
         "&H00000000,&HA0000000,1,0,0,0,100,100,0,0,1,0,5,5,0,0,0,1",
         f"Style: CTAsub,{font},{round(height * 0.024)},&H00{accent},&H00{accent},"

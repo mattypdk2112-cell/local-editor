@@ -51,7 +51,7 @@ def transcribe(video: Path, project: Path, *, model_size: str = "small", languag
     wav = extract_audio(video, project / "audio.wav")
 
     print(f"  loading faster-whisper '{model_size}' (int8, cpu)…")
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    model = get_model(model_size)
 
     terms = [t.strip() for t in (vocab or []) if t and t.strip()]
     initial_prompt = ("Glossary: " + ", ".join(terms) + ".") if terms else None

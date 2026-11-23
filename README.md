@@ -102,6 +102,11 @@ reuses the transcript, so fixing the cut is fast: change a line in `script.txt`,
 | `--music beat.mp3` | Lays a track underneath, mixed low so your voice sits on top |
 | `--height 1080` | Exports smaller than a 4K source. Faster, and plenty for a reel |
 | `--no-normalize` | Keeps your raw audio level, for when you finish the mix in Premiere or CapCut |
+| `--drop 37.4-38.4` | Cuts out a stretch of the source by hand (seconds, from `projects/<name>/transcript.json`). For a stumble the automatic passes missed. Takes several |
+| `--pin 12.5` | Protects a moment in the source (a reaction, a reveal) from trimming and tells you where it landed in the cut |
+| `--noise-db -38` | The silence floor for finding speech, in dBFS (decibels below full scale). Default -42. Raise it on a noisy room |
+| `--title "TEXT"` | A title card at the start. Works with captions on or off. `--title-variant` picks the look: badge, headline, problem, plate, native |
+| `--no-proxy` | Works from the original file even when it is 4K or HEVC (see Proxies below) |
 
 **Captions in your colours:** `--accent FF3D71` takes a plain hex with no hash,
 `--words-per-line 2` sets how many show at once, `--no-uppercase` keeps your casing.
@@ -112,6 +117,20 @@ transcript first, then burn. If it mishears something, `--fix 'heard=actual'` co
 it before it goes in.
 
 Run `./edit --help` for the rest. There are a lot of dials, you will not need most of them.
+
+## Proxies
+
+Every stage reads the whole clip from the top, and 1440p-or-larger footage, or HEVC,
+ProRes, AV1 and VP9 files (what iPhones and most cameras record), decode slowly. For
+those the editor makes one 1080p H.264 copy (the proxy) the first time, keeps it in a
+`.proxies` folder next to your footage, and cuts from that. The second run reuses it.
+
+The finished video is then 1080p, which is plenty for a reel. To cut from the original
+at full size, pass `--no-proxy`; to force a proxy on a smaller file, pass `--proxy`.
+Delete the `.proxies` folder whenever you like, it is rebuilt on demand.
+
+Phone footage shot in HDR (HLG) is converted to normal colour automatically, so it does
+not come out grey.
 
 ## About those two AI flags
 
@@ -159,6 +178,43 @@ accurate pass.
 
 Still broken? Reply to the DM you got this from and tell me what happened. I read all
 of them.
+
+## Usage reports
+
+Every `./edit` and `./reel` run adds one line to `usage-report.jsonl` in this folder.
+That file always exists once you have run the editor, it is ignored by git, and it
+never leaves your machine on its own. `./report` prints it as a short summary you can
+copy and send to Matt if you want to (`./report --raw` shows the lines as stored).
+
+Each line holds exactly these fields:
+
+- `tool`: edit or reel
+- `run_id`: a random id, so a run is never counted twice
+- `ts`: when the run started (UTC)
+- `version`: the editor's git commit
+- `os`, `python`: for example `Darwin 25.6.0 arm64`, `3.9.6`
+- `flags`: the flag names you used, like `--captions`. Never their values
+- `input_duration_s`, `input_width`, `input_height`: length and frame size of the input
+- `output_duration_s`, `clips`: length of the result, and how many clips a reel used
+- `stages`, `total_s`: seconds per stage (transcribe, roughcut, assemble...) and in total
+- `ok`, `exit_code`: whether it worked
+- `error`, `traceback`: only on a crash. The error message with every path, filename,
+  argument value and quoted text replaced by `<path>`, `<file>`, `<hidden>` or `<text>`,
+  and the last 8 lines of the editor's own code it passed through
+  (like `src/assemble.py:120 in assemble`)
+
+Never your footage, transcript text, file paths or filenames.
+
+**Nothing is sent without an invite code.** `./setup` asks once: "Got an invite code
+from Matt? Paste it, or press Enter to skip." Matt hands codes out personally. With a
+code, each line is also sent to him from a background process with a 4 second timeout,
+so it never slows down or breaks an edit, and the copy that was sent is kept at
+`projects/.last-usage-report.json`. Without one, nothing ever leaves your laptop.
+There are no notifications or alerts on either side.
+
+**Stop sending:** `rm .usage-reports.json` (`./setup` asks again next time), or run with
+`LOCAL_EDITOR_REPORTS=0`.
+**Delete the log:** `rm usage-report.jsonl`. It starts fresh on the next run.
 
 ## Licence
 

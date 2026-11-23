@@ -389,8 +389,13 @@ def drop_orphan_ranges(ranges: list[list[float]], words: list[dict], *,
     kept: list[list[float]] = []
     dropped: list[dict] = []
     for a, b in ranges:
+        # A word counts if the range holds a real piece of it, not only if its
+        # centre lands inside. On 2026-11-21 a 0.48s range held the tail of a
+        # dragged "which" and the head of "I"; neither centre was in it, so it
+        # read as wordless and was dropped, and the render said "no jobs. I think".
         toks = [_norm(w["word"]) for w in words
-                if a - 0.02 <= (w["start"] + w["end"]) / 2 <= b + 0.02]
+                if min(b, w["end"]) - max(a, w["start"])
+                >= min(0.10, 0.5 * (w["end"] - w["start"]))]
         toks = [t for t in toks if t]
         # A range holding NO words at all is pure noise — `tighten` can leave one
         # behind when it snaps a blade (0.24s of nothing survived into Matt's
@@ -404,3 +409,32 @@ def drop_orphan_ranges(ranges: list[list[float]], words: list[dict], *,
             continue
         kept.append([a, b])
     return kept, dropped
+
+
+def map_to_output(ranges: list[list[float]], t: float) -> float | None:
+    """Where a SOURCE timestamp lands in the finished cut, or None if it was removed.
+
+    Every stage rewrites `ranges` by time, so a moment you care about ends up at an output
+    second nobody computed. Call this AFTER the cut is final. None means the moment was
+    trimmed away."""
+    acc = 0.0
+    for a, b in ranges:
+        if a <= t < b:
+            return round(acc + (t - a), 3)
+        acc += b - a
+    return None
+
+
+def protect_window(ranges: list[list[float]], t: float,
+                   before: float = 1.5, after: float = 2.5) -> list[list[float]]:
+    """Force a window around a source timestamp back into the keep-ranges (used by --pin),
+    merged with whatever it overlaps so the result stays a clean sorted range list."""
+    lo, hi = max(0.0, t - before), t + after
+    out = sorted([list(r) for r in ranges] + [[lo, hi]])
+    merged = [out[0]]
+    for a, b in out[1:]:
+        if a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return merged

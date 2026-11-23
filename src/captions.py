@@ -159,7 +159,10 @@ def build_ass(
     # Stroke calibrated against a real CapCut export at dial 60, whose outline measures
     # 1.079% of frame width. Proportion, not pixels — that is the only thing that
     # transfers between a screenshot, a reel and a landscape render.
-    outline = max(1, round(fontsize * 0.00207 * max(0.0, stroke)))
+    # stroke=0 must mean NO outline. max(1, ...) left a 1px black fringe on a caption
+    # that asked for none, which reads as a rendering fault at size.
+    outline = (0 if stroke <= 0
+               else max(1, round(fontsize * 0.00207 * stroke)))
     shadow = max(0, round(fontsize * 0.001 * max(0.0, shadow_pct)))
     # The box has to clear the stroke or it's invisible: a heavy outline (stroke 60 =
     # .18em) is wider than a fixed .12em pad, so the black stroke ate the highlight.
@@ -254,7 +257,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if i + 1 < len(lines):
             end = min(end, lines[i + 1][0]["new_start"])
         if end <= start:
-            end = start + 0.20
+            # Forcing start+0.20 here pushed the line straight back on top of the next
+            # caption on fast speech, so two captions drew in the same place. Give the
+            # line the air that is actually there, and if there is none, drop it.
+            end = (lines[i + 1][0]["new_start"] if i + 1 < len(lines)
+                   else line[-1]["new_end"] + 0.25)
+            if end - start < 0.12:
+                continue
 
         shown = [_clean(w["word"], uppercase, strip_punct) for w in line]
         if not any(s for s in shown):
@@ -268,7 +277,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             space_w = metrics.advance(" ") * ppu
             widths = [metrics.text_width(s, fontsize) for s in shown]
             total = sum(widths) + space_w * (len(shown) - 1)
-            pen = (width - total) / 2.0
+            # Left-aligned (--caption-x) lines start at MarginL; centred lines centre.
+            pen = float(margin_l) if align == 1 else (width - total) / 2.0
             # \an5 centres a word's LINE box on \pos, so back out where the baseline lands.
             baseline = height - margin_v
             cy = baseline + fontsize / 2.0 - metrics.win_ascent * ppu

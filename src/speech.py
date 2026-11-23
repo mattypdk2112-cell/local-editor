@@ -178,17 +178,25 @@ def envelope(wav: Path, start: float = 0.0, end: float | None = None,
 
 def speech_runs(wav: Path, start: float = 0.0, end: float | None = None,
                 *, noise_db: float = NOISE_DB, min_run: float = MIN_RUN,
-                hop: float = HOP) -> list[tuple[float, float]]:
+                hop: float = HOP, adaptive: bool = True) -> list[tuple[float, float]]:
     """Contiguous spans that are above the noise floor — i.e. someone talking.
 
     Deliberately still a FIXED floor: this feeds `tighten`, which needs to see the
     quiet onset of a plosive as speech so it does not clip it. Breath removal is a
     separate, later pass — see `breath_gaps`.
     """
+    env = list(envelope(wav, start, end, hop=hop))
+    # The fixed floor assumes a quiet room. Outdoors (wind, traffic) the background sits above
+    # it, so every gap read as speech and nothing was removed. The floor never sits below the
+    # recording's own quietest audio (10th percentile) + 6 dB.
+    # adaptive=False keeps the fixed floor, which carving needs (edit.py step 2.5).
+    if env and adaptive:
+        quiet = sorted(db for _, db in env)[int(len(env) * 0.10)]
+        noise_db = max(noise_db, quiet + 6.0)
     runs: list[tuple[float, float]] = []
     open_at: float | None = None
     last = start
-    for t, db in envelope(wav, start, end, hop=hop):
+    for t, db in env:
         loud = db > noise_db
         if loud and open_at is None:
             open_at = t
@@ -293,6 +301,16 @@ def tighten(ranges: list[list[float]], runs: list[tuple[float, float]], *,
                 if cand < na:
                     word_fix["head_word"] = [round(na, 3), cand]
                     na = cand
+
+        # Never snap an edge back INTO a span that was cut on purpose (a bad take, a
+        # retake). Speech can run straight from a kept line into a false start with no
+        # pause ("work? Top 10 things that,"), so the measured run's edge sits inside the
+        # flagged words and snapping to it put them back (white hoodie test, 23 Nov 2026).
+        for p0, p1 in protect:
+            if na < p1 <= a + 0.15 and p1 < nb:
+                na = round(p1, 3)
+            if b - 0.15 <= p0 < nb and p0 > na:
+                nb = round(p0, 3)
 
         entry = {
             "range": [a, b], "action": "tightened", "new": [na, nb],
